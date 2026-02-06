@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Maya Dev UI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="root">
+    <header id="top-bar">
+      <span id="status-label">Connected</span>
+      <div class="actions">
+        <button id="btn-run">Run</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+    </header>
+
+    <main id="layout">
+      <section id="editor-pane">
+        <textarea id="code-editor"></textarea>
+      </section>
+      <section id="preview-pane">
+        <iframe id="preview-iframe"></iframe>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
