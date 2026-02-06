@@ -6,10 +6,29 @@ const codeEditor = document.getElementById('code-editor');
 const runButton = document.getElementById('btn-run');
 const consoleOutput = document.getElementById('console-output');
 const statusLabel = document.getElementById('status-label');
+const apiKeyInput = document.getElementById('api-key-input');
+const apiKeySaveBtn = document.getElementById('api-key-save-btn');
 
 const chatHistory = [];
 
 codeEditor.value = `// Write JavaScript here and click Run Code.\n\nconst greeting = "Hello from Maya Dev UI";\nconsole.log(greeting);\n\n(() => greeting.toUpperCase())();`;
+
+const savedApiKey = localStorage.getItem('openai_api_key');
+if (savedApiKey && apiKeyInput) {
+  apiKeyInput.value = savedApiKey;
+}
+
+if (apiKeySaveBtn) {
+  apiKeySaveBtn.addEventListener('click', () => {
+    const key = apiKeyInput?.value?.trim();
+    if (key) {
+      localStorage.setItem('openai_api_key', key);
+      alert('API key saved.');
+    } else {
+      alert('Please enter a valid API key before saving.');
+    }
+  });
+}
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
@@ -37,6 +56,19 @@ function handleConsoleLog(...args) {
   appendOutput(args.map((item) => String(item)).join(' '), 'success');
 }
 
+function getOpenAiApiKey() {
+  const inputKey = apiKeyInput?.value?.trim();
+  let apiKey = localStorage.getItem('openai_api_key');
+  if (inputKey) {
+    apiKey = inputKey;
+    localStorage.setItem('openai_api_key', apiKey);
+  }
+  if (!apiKey) {
+    throw new Error('No API key provided. Please enter your OpenAI API key in the API key field and click Save.');
+  }
+  return apiKey;
+}
+
 async function sendChat() {
   const prompt = chatInput.value.trim();
   if (!prompt) {
@@ -56,12 +88,13 @@ async function sendChat() {
   setStatusOnline(false);
 
   try {
+    const apiKey = getOpenAiApiKey();
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ messages: chatHistory })
+      body: JSON.stringify({ messages: chatHistory, apiKey })
     });
 
     if (!response.ok || !response.body) {
