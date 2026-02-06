@@ -6,8 +6,7 @@ const codeEditor = document.getElementById('code-editor');
 const runButton = document.getElementById('btn-run');
 const consoleOutput = document.getElementById('console-output');
 const statusLabel = document.getElementById('status-label');
-const chatHistory = [];
-const apiEndpoint = 'https://your-project-name.vercel.app/api/chat';
+const BACKEND_URL = 'https://maya-llm-proxy.workers.dev/chat';
 
 codeEditor.value = `// Write JavaScript here and click Run Code.\n\nconst greeting = "Hello from Maya Dev UI";\nconsole.log(greeting);\n\n(() => greeting.toUpperCase())();`;
 
@@ -37,6 +36,26 @@ function handleConsoleLog(...args) {
   appendOutput(args.map((item) => String(item)).join(' '), 'success');
 }
 
+function buildWrappedPrompt(userInput) {
+  return `
+Return JSON ONLY.
+
+Schema:
+{
+  "text": "plain explanation for the user",
+  "code": "complete HTML/CSS/JS runnable in an iframe"
+}
+
+Rules:
+- No markdown
+- No commentary outside JSON
+- Code must be self-contained
+
+User request:
+${userInput}
+`;
+}
+
 async function sendChat() {
   const prompt = chatInput.value.trim();
   if (!prompt) {
@@ -44,24 +63,25 @@ async function sendChat() {
   }
 
   chatInput.value = '';
-  const userMessage = { role: 'user', content: prompt };
-  chatHistory.push(userMessage);
   appendMessage('user', prompt);
 
-  const assistantMessage = { role: 'assistant', content: '' };
-  chatHistory.push(assistantMessage);
   const assistantBubble = appendMessage('assistant', '');
 
   sendButton.disabled = true;
   setStatusOnline(false);
 
   try {
-    const response = await fetch(apiEndpoint, {
+    const messages = [
+      { role: 'system', content: 'You are a UI-generating assistant.' },
+      { role: 'user', content: buildWrappedPrompt(prompt) }
+    ];
+
+    const response = await fetch(BACKEND_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ messages: chatHistory })
+      body: JSON.stringify({ messages })
     });
 
     if (!response.ok) {
@@ -73,7 +93,6 @@ async function sendChat() {
 
     const data = await response.json();
     const reply = data?.choices?.[0]?.message?.content || 'No response.';
-    assistantMessage.content = reply;
     assistantBubble.textContent = reply;
     chatMessages.scrollTop = chatMessages.scrollHeight;
   } catch (error) {
