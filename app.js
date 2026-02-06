@@ -3,14 +3,15 @@ const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
 const codeEditor = document.getElementById('code-editor');
-const runButton = document.getElementById('btn-run');
 const consoleOutput = document.getElementById('console-output');
 const previewFrame = document.getElementById('preview-frame');
 const statusLabel = document.getElementById('status-label');
+const regenModeRegenerate = document.getElementById('regen-mode-regenerate');
+const regenModeLock = document.getElementById('regen-mode-lock');
 const BACKEND_URL =
   "https://text-code.primarydesigncompany.workers.dev";
 
-codeEditor.value = `// Write JavaScript here and click Run Code.\n\nconst greeting = "Hello from Maya Dev UI";\nconsole.log(greeting);\n\n(() => greeting.toUpperCase())();`;
+codeEditor.value = `// Write JavaScript here to experiment with the editor.\n\nconst greeting = "Hello from Maya Dev UI";\nconsole.log(greeting);\n\n(() => greeting.toUpperCase())();`;
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
@@ -38,7 +39,15 @@ function handleConsoleLog(...args) {
   appendOutput(args.map((item) => String(item)).join(' '), 'success');
 }
 
-function buildWrappedPrompt(userInput) {
+function buildWrappedPrompt(userInput, options = {}) {
+  const { isLocked, existingCode } = options;
+  const codeContext = isLocked && existingCode
+    ? `\nCurrent code to modify (do not replace entirely):\n${existingCode}\n`
+    : '';
+  const lockInstruction = isLocked
+    ? '- You must update the current code based on the request, preserving structure when possible\n'
+    : '- Generate a fresh implementation from scratch\n';
+
   return `
 Return JSON ONLY. No markdown. No commentary.
 
@@ -53,7 +62,9 @@ Rules:
 - No external libraries
 - Inline CSS and JS only
 - Do not escape HTML
+${lockInstruction}
 
+${codeContext}
 User request:
 ${userInput}
 `;
@@ -88,7 +99,10 @@ async function sendChat() {
       },
       {
         role: 'user',
-        content: buildWrappedPrompt(prompt)
+        content: buildWrappedPrompt(prompt, {
+          isLocked: regenModeLock?.checked,
+          existingCode: codeEditor.value.trim()
+        })
       }
     ];
 
@@ -110,22 +124,21 @@ async function sendChat() {
     try {
       parsed = JSON.parse(reply);
     } catch {
-      assistantBubble.textContent = reply;
-      chatMessages.scrollTop = chatMessages.scrollHeight;
+      assistantBubble.remove();
+      appendMessage('assistant', '⚠️ Model returned invalid JSON.');
       return;
     }
 
-    if (parsed.text) {
-      assistantBubble.textContent = parsed.text;
-      chatMessages.scrollTop = chatMessages.scrollHeight;
-    } else {
+    if (!parsed.text || !parsed.code) {
       assistantBubble.remove();
+      appendMessage('assistant', '⚠️ Response missing required fields.');
+      return;
     }
 
-    if (parsed.code) {
-      codeEditor.value = parsed.code;
-      runGeneratedCode(parsed.code);
-    }
+    assistantBubble.textContent = parsed.text;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    codeEditor.value = parsed.code;
+    runGeneratedCode(parsed.code);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error.';
     appendMessage('system', message);
@@ -134,31 +147,9 @@ async function sendChat() {
   }
 }
 
-function runCode() {
-  consoleOutput.innerHTML = '';
-  const originalConsoleLog = console.log;
-  console.log = handleConsoleLog;
-
-  try {
-    const result = eval(codeEditor.value);
-    if (result !== undefined) {
-      appendOutput(String(result), 'success');
-    } else {
-      appendOutput('Code executed (no return value).', 'success');
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error.';
-    appendOutput(`Error: ${message}`, 'error');
-  } finally {
-    console.log = originalConsoleLog;
-  }
-}
-
 chatForm.addEventListener('submit', (event) => {
   event.preventDefault();
   sendChat();
 });
-
-runButton.addEventListener('click', runCode);
 
 setStatusOnline(false);
