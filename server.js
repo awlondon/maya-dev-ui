@@ -3,7 +3,7 @@ import express from 'express';
 const app = express();
 const port = process.env.PORT || 3000;
 const apiUrl = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
-const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static('.'));
@@ -36,34 +36,19 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model,
-        stream: true,
+        stream: false,
         messages: payloadMessages
       })
     });
 
-    if (!upstream.ok || !upstream.body) {
+    if (!upstream.ok) {
       const text = await upstream.text();
       res.status(upstream.status).send(text || 'Upstream error.');
       return;
     }
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      res.write(decoder.decode(value, { stream: true }));
-    }
-
-    res.end();
+    const data = await upstream.json();
+    res.status(200).json(data);
   } catch (error) {
     res.status(500).json({
       error: error instanceof Error ? error.message : 'Unexpected server error.'
