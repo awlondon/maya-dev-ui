@@ -19,7 +19,7 @@ maya-dev-ui/
 You can preview the dev iframe and host integration by opening `host-sample.html` in a local web server. For example:
 
 ```bash
-python3 -m http.server -d maya-dev-ui 8080
+python -m http.server -d maya-dev-ui 8080
 ```
 
 Then navigate to http://localhost:8080/host-sample.html in your browser.
