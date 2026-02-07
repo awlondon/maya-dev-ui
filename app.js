@@ -5,6 +5,8 @@ const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
 const codeEditor = document.getElementById('code-editor');
+const lineNumbersEl = document.getElementById('line-numbers');
+const lineCountEl = document.getElementById('line-count');
 const consoleLog = document.getElementById('console-output-log');
 const consolePane = document.getElementById('consoleOutput');
 let sandboxFrame = document.getElementById('sandbox');
@@ -41,6 +43,19 @@ const defaultInterfaceCode = `<!doctype html>
 <div id="app"></div>
 </body>
 </html>`;
+
+function updateLineNumbers() {
+  if (!codeEditor || !lineNumbersEl || !lineCountEl) {
+    return;
+  }
+  const lines = codeEditor.value.split('\n').length;
+  let numbers = '';
+  for (let i = 1; i <= lines; i += 1) {
+    numbers += `${i}\n`;
+  }
+  lineNumbersEl.textContent = numbers;
+  lineCountEl.textContent = `Lines: ${lines}`;
+}
 
 codeEditor.value = defaultInterfaceCode;
 let currentCode = defaultInterfaceCode;
@@ -123,6 +138,8 @@ const preview = {
 if (sandboxFrame) {
   preview.attach(sandboxFrame);
 }
+
+updateLineNumbers();
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
@@ -638,6 +655,7 @@ function setCodeFromLLM(code) {
   updateRunButtonVisibility();
   updateRollbackVisibility();
   updatePromoteVisibility();
+  updateLineNumbers();
   setPreviewStatus('Preview updated by assistant');
 }
 
@@ -893,6 +911,14 @@ codeEditor.addEventListener('input', () => {
     markPreviewStale();
   }
   resetExecutionPreparation();
+  updateLineNumbers();
+});
+
+codeEditor.addEventListener('scroll', () => {
+  if (!lineNumbersEl) {
+    return;
+  }
+  lineNumbersEl.scrollTop = codeEditor.scrollTop;
 });
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -926,6 +952,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateRunButtonVisibility();
     updateRollbackVisibility();
     updatePromoteVisibility();
+    updateLineNumbers();
     handleUserRun(lastLLMCode, 'rolled back', 'Rolling back to last generated…');
     setStatus('RUNNING', 'rolled back');
   });
