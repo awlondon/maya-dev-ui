@@ -2,10 +2,11 @@
 // Minimal, explicit, animation-safe execution controller
 
 export function createSandboxController({
-  iframe,
+  iframe: initialIframe,
   statusEl,
   maxFiniteMs = 4000,
 } = {}) {
+  let iframe = initialIframe;
   let mode = "idle"; // idle | finite | animation
   let startTime = 0;
   let frameCount = 0;
@@ -104,6 +105,9 @@ export function createSandboxController({
   return {
     run(code) {
       inject(code);
+    },
+    setIframe(nextIframe) {
+      iframe = nextIframe;
     },
     stop,
     pause,
