@@ -37,35 +37,97 @@ const defaultInterfaceCode = `<!doctype html>
     overflow: hidden;
   }
 
-  #gesture {
-    font-size: 64px;
+  .attention-field {
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 40% 35%, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.02) 45%, rgba(15, 23, 42, 0.6) 70%);
+    box-shadow: 0 0 40px rgba(56, 189, 248, 0.18), inset 0 0 30px rgba(148, 163, 184, 0.2);
+    position: relative;
     cursor: pointer;
-    transition: transform 0.3s ease;
+    transition: transform 0.4s ease, box-shadow 0.4s ease;
+    animation: breathe 5s ease-in-out infinite;
   }
 
-  #gesture.wave {
-    animation: wave 0.8s ease-in-out;
+  .attention-field:hover {
+    transform: scale(1.03);
+    box-shadow: 0 0 60px rgba(56, 189, 248, 0.28), inset 0 0 40px rgba(148, 163, 184, 0.3);
   }
 
-  @keyframes wave {
-    0% { transform: rotate(0deg); }
-    25% { transform: rotate(20deg); }
-    50% { transform: rotate(-15deg); }
-    75% { transform: rotate(15deg); }
-    100% { transform: rotate(0deg); }
+  .attention-field::before {
+    content: "";
+    position: absolute;
+    inset: 20%;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(94, 234, 212, 0.35), rgba(94, 234, 212, 0));
+    filter: blur(6px);
+    opacity: 0.7;
+    transition: opacity 0.4s ease;
+  }
+
+  .attention-field.active::before {
+    opacity: 1;
+  }
+
+  .ripple {
+    position: absolute;
+    inset: 10%;
+    border-radius: 50%;
+    border: 1px solid rgba(248, 250, 252, 0.4);
+    opacity: 0;
+    transform: scale(0.8);
+    pointer-events: none;
+  }
+
+  .attention-field.ripple .ripple {
+    animation: ripple 0.9s ease-out;
+  }
+
+  @keyframes breathe {
+    0%, 100% {
+      transform: scale(0.98);
+      box-shadow: 0 0 35px rgba(56, 189, 248, 0.16), inset 0 0 26px rgba(148, 163, 184, 0.2);
+    }
+    50% {
+      transform: scale(1);
+      box-shadow: 0 0 55px rgba(56, 189, 248, 0.3), inset 0 0 40px rgba(148, 163, 184, 0.28);
+    }
+  }
+
+  @keyframes ripple {
+    0% {
+      opacity: 0.7;
+      transform: scale(0.7);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(1.2);
+    }
   }
 </style>
 </head>
 <body>
-  <div id="gesture">👋</div>
+  <div class="attention-field" id="attentionField">
+    <span class="ripple"></span>
+  </div>
 
 <script>
-  const g = document.getElementById("gesture");
-  g.onclick = () => {
-    g.classList.remove("wave");
-    void g.offsetWidth;
-    g.classList.add("wave");
+  const field = document.getElementById("attentionField");
+  const triggerRipple = () => {
+    field.classList.remove("ripple");
+    void field.offsetWidth;
+    field.classList.add("ripple");
   };
+
+  field.addEventListener("mouseenter", () => {
+    field.classList.add("active");
+  });
+
+  field.addEventListener("mouseleave", () => {
+    field.classList.remove("active");
+  });
+
+  field.addEventListener("click", triggerRipple);
 </script>
 </body>
 </html>`;
@@ -337,7 +399,8 @@ Behavior rules:
 - Respond naturally and conversationally in the "text" field.
 - Always include the "code" field.
 - Always return a complete HTML/CSS/JS document by modifying or extending the existing interface.
-- Treat the existing interface as a living, expressive body.
+- Treat the existing interface as a responsive workspace or field.
+- Prefer ambient, structural, or kinetic changes over representational characters or literal symbols.
 - Prefer modifying behavior, motion, or interaction over replacing the interface.
 - Do NOT simply render user text unless explicitly asked.
 - The interface is an expressive gesture, not a transcript.
