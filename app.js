@@ -221,10 +221,41 @@ if (splitter && rightPane && codePanel && outputPanel) {
 }
 
 if (fullscreenToggle && consolePane) {
+  const enterFullscreen = () => {
+    consolePane.classList.add('preview-fullscreen');
+    document.body.style.overflow = 'hidden';
+    fullscreenToggle.textContent = '⤡ Exit Fullscreen';
+  };
+
+  const exitFullscreen = () => {
+    consolePane.classList.remove('preview-fullscreen');
+    document.body.style.overflow = '';
+    fullscreenToggle.textContent = '⤢ Fullscreen';
+  };
+
   fullscreenToggle.addEventListener('click', () => {
-    const isFullscreen = consolePane.classList.toggle('preview-fullscreen');
-    document.body.style.overflow = isFullscreen ? 'hidden' : '';
-    fullscreenToggle.textContent = isFullscreen ? '⤡ Exit Fullscreen' : '⤢ Fullscreen';
+    const isFullscreen = consolePane.classList.contains('preview-fullscreen');
+    if (isFullscreen) {
+      exitFullscreen();
+      return;
+    }
+    enterFullscreen();
+  });
+
+  consolePane.addEventListener('dblclick', (event) => {
+    event.preventDefault();
+    const isFullscreen = consolePane.classList.contains('preview-fullscreen');
+    if (isFullscreen) {
+      exitFullscreen();
+      return;
+    }
+    enterFullscreen();
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && consolePane.classList.contains('preview-fullscreen')) {
+      exitFullscreen();
+    }
   });
 }
 

@@ -225,6 +225,7 @@ button:disabled {
   position: relative;
   overflow: hidden;
   flex: 1 1 auto;
+  cursor: zoom-in;
 }
 
 .console-output.preview-fullscreen {
@@ -233,6 +234,7 @@ button:disabled {
   z-index: 999999;
   background: #000;
   display: flex;
+  cursor: zoom-out;
 }
 
 .output-panel {
