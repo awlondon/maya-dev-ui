@@ -621,9 +621,16 @@ When intent implies movement, animation, simulation, random patterns, or competi
 - Alternative: setInterval stepping when smoothness is not critical.
 - Optional: start/stop hooks for user-controlled runs.
 Treat sandbox limits as expected; stop cleanly without errors.
+If a task describes an ongoing or convergent simulation, generate a sandbox-bounded demonstration with a clear summary at termination instead of an unbounded process.
 
 SANDBOX ANIMATION CONTRACT (AUTO-INJECTED, REQUIRED):
 - Every animation/simulation must be finite by default with explicit INIT → RUN → YIELD → STOP phases.
+- Demonstration Mode (default): bounded, shows behavior, stops gracefully, reports partial results.
+- Simulation Mode (opt-in only): goal-seeking, potentially unbounded, requires explicit user consent and must expose pause/resume/step controls.
+- Demonstration Downgrade Rule (critical): if the prompt specifies a condition that may not converge within the sandbox time or frame budget, reinterpret the request as a bounded demonstration, not a full simulation.
+- Goal Completion Rule: if the prompt includes any of: "until", "only one remains", "eventually", "keeps going", "continues until", "winner", "last remaining", then BOTH are mandatory:
+  - A sandbox-bounded stopping condition.
+  - A partial-state summary at stop time.
 - Hard caps: const SANDBOX_TIME_LIMIT_MS = 4500; const SANDBOX_FRAME_LIMIT = 300; let frameCount = 0; const startTime = performance.now();
 - Cooperative guard:
   function shouldStop() {
@@ -633,6 +640,15 @@ SANDBOX ANIMATION CONTRACT (AUTO-INJECTED, REQUIRED):
     );
   }
 - Loop must exit cleanly when shouldStop() is true; no unbounded RAF, while(true), recursion, or setInterval without a stop.
+- Mandatory bounded termination: every animation must include one of:
+  // A) Time bounded
+  if (SANDBOX.shouldStop()) endDemo();
+  // B) Frame bounded
+  if (frameCount >= MAX_FRAMES) endDemo();
+  // C) Event bounded + fallback
+  if (winnerFound || SANDBOX.shouldStop()) endDemo();
+  Never event-only.
+- Mandatory end-of-demo report: at termination, summarize state (examples: “42 turtles remain”, “Current largest turtle is #17”, “Top 3 colors by size: …”, “Simulation stopped early due to sandbox limit”).
 - Auto-inject this scaffold when animation intent is detected (do not explain unless asked):
   const SANDBOX = {
     maxFrames: 300,
