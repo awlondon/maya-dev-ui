@@ -114,6 +114,17 @@ function setStatusOnline(isOnline) {
   statusLabel.classList.toggle('online', isOnline);
 }
 
+function setStatus(status, source) {
+  if (!interfaceStatus) {
+    return;
+  }
+  const label = source ? `${status} · ${source}` : status;
+  interfaceStatus.textContent = label;
+  const isUpdated = /running|compiling|baseline|rolled|promoted|reset/i.test(status);
+  interfaceStatus.classList.toggle('updated', isUpdated);
+  interfaceStatus.classList.toggle('unchanged', !isUpdated);
+}
+
 function addMessage(role, html, options = {}) {
   const message = document.createElement('div');
   message.className = `message ${role}${options.className ? ` ${options.className}` : ''}`;
@@ -171,9 +182,22 @@ function runWhenPreviewReady(runFn) {
     return;
   }
 
-  preview.once('ready', () => {
+  let hasRun = false;
+  const runOnce = () => {
+    if (hasRun) {
+      return;
+    }
+    hasRun = true;
     runFn();
-  });
+  };
+
+  preview.once('ready', runOnce);
+  setTimeout(() => {
+    if (!preview.isReady()) {
+      console.warn('⚠️ Preview readiness timeout; running anyway.');
+      runOnce();
+    }
+  }, 500);
 }
 
 function updateMessage(id, newHtml) {
@@ -248,6 +272,29 @@ function getSandboxModeForExecution(executionProfile) {
   return executionProfile === 'animation' || executionProfile === 'canvas-sim'
     ? 'animation'
     : 'finite';
+}
+
+function updateExecutionWarningsFor(code) {
+  const warnings = [];
+  if (!code) {
+    applyExecutionWarnings(warnings);
+    return { executionProfile: 'finite' };
+  }
+
+  if (code.includes('while(true)') || code.includes('for(;;)')) {
+    warnings.push('Potential infinite loop detected.');
+  }
+
+  if (code.includes('setInterval')) {
+    warnings.push('setInterval can create runaway execution in finite mode.');
+  }
+
+  const executionProfile = code.includes('requestAnimationFrame') || code.includes('<canvas')
+    ? 'animation'
+    : 'finite';
+
+  applyExecutionWarnings(warnings);
+  return { executionProfile };
 }
 
 function setSandboxControlsVisible(isVisible) {
@@ -526,6 +573,10 @@ function markPreviewStale() {
   updatePromoteVisibility();
 }
 
+function resetExecutionPreparation() {
+  applyExecutionWarnings([]);
+}
+
 function updateRunButtonVisibility() {
   if (!runButton) {
     return;
@@ -758,7 +809,7 @@ Otherwise, respond with plain text.`;
   }
 
   const chatText =
-    extractedText || (extractedHtml ? '' : normalizedReply.trim());
+    extractedText || (extractedHtml ? 'Generated the updated interface.' : normalizedReply.trim());
 
   const nextCode = extractedHtml;
   const hasCode = Boolean(nextCode);
