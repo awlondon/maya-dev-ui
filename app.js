@@ -7,7 +7,8 @@ const sendButton = document.getElementById('btn-send');
 const codeEditor = document.getElementById('code-editor');
 const consoleLog = document.getElementById('console-output-log');
 const consolePane = document.getElementById('consoleOutput');
-const sandboxFrame = document.getElementById('sandbox');
+let sandboxFrame = document.getElementById('sandbox');
+const previewFrameHost = document.getElementById('previewFrameContainer');
 const statusLabel = document.getElementById('status-label');
 const generationIndicator = document.getElementById('generation-indicator');
 const previewStatus = document.getElementById('previewStatus');
@@ -55,9 +56,8 @@ let sandboxAnimationState = 'idle';
 let lastRunCode = null;
 let lastRunSource = null;
 let lastCodeSource = null;
-let activeTurnId = 0;
-let currentTurnId = 0;
-const finalizedTurns = new Set();
+const chatFinalizeState = new Map();
+let currentTurnMessageId = null;
 let pendingAssistantProposal = null;
 const DEBUG_INTENT = false;
 const chatState = {
@@ -70,6 +70,22 @@ const sandbox = createSandboxController({
   statusEl: sandboxStatus,
   maxFiniteMs: SANDBOX_TIMEOUT_MS
 });
+
+function resetSandboxFrame() {
+  if (!previewFrameHost) {
+    return sandboxFrame;
+  }
+  previewFrameHost.innerHTML = '';
+  const nextFrame = document.createElement('iframe');
+  nextFrame.id = 'sandbox';
+  nextFrame.setAttribute('sandbox', 'allow-scripts');
+  nextFrame.style.width = '100%';
+  nextFrame.style.height = '100%';
+  previewFrameHost.appendChild(nextFrame);
+  sandboxFrame = nextFrame;
+  sandbox.setIframe(nextFrame);
+  return nextFrame;
+}
 
 const preview = (() => {
   let ready = false;
@@ -153,14 +169,21 @@ function appendMessage(role, content, options = {}) {
   return message;
 }
 
-function startChatTurn() {
-  activeTurnId += 1;
-  currentTurnId = activeTurnId;
-  return currentTurnId;
-}
+function renderAssistantMessage(messageId, text, metadata) {
+  const safeText =
+    (typeof text === 'string' && text.trim().length)
+      ? text.trim()
+      : 'Generated output.';
 
-function renderChatMessage(text, messageId) {
-  renderAssistantText(text ?? '', messageId);
+  if (messageId) {
+    updateMessage(messageId, formatAssistantHtml(safeText));
+  } else {
+    appendMessage('assistant', safeText);
+  }
+
+  if (metadata) {
+    appendChatMeta(metadata, messageId);
+  }
 }
 
 function appendChatMeta(text, messageId) {
@@ -188,18 +211,25 @@ function appendChatMeta(text, messageId) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
-function finalizeChatOnce(turnId, finalizeFn) {
-  if (finalizedTurns.has(turnId)) {
-    console.warn('Finalize skipped (already finalized):', turnId);
-    return;
+function finalizeChatOnce(messageId, { text, ms, mode } = {}) {
+  const state = chatFinalizeState.get(messageId);
+  if (state?.finalized) {
+    console.warn('Finalize skipped (already finalized):', messageId);
+    return false;
   }
-  finalizedTurns.add(turnId);
 
-  try {
-    finalizeFn();
-  } catch (err) {
-    console.error('[finalizeChatOnce] finalize failed:', err);
+  chatFinalizeState.set(messageId, { finalized: true });
+
+  const metadataChunks = [];
+  if (typeof ms === 'number') {
+    metadataChunks.push(formatGenerationMetadata(ms));
   }
+  if (mode) {
+    metadataChunks.push(mode);
+  }
+
+  renderAssistantMessage(messageId, text, metadataChunks.join(' '));
+  return true;
 }
 
 function runWhenPreviewReady(runFn) {
@@ -349,15 +379,6 @@ function setPreviewExecutionStatus(state, message) {
   previewExecutionStatus.className = `preview-execution-status ${state}`;
 }
 
-function renderAssistantText(text, messageId) {
-  if (messageId) {
-    updateMessage(messageId, formatAssistantHtml(text));
-    return;
-  }
-
-  appendMessage('assistant', text);
-}
-
 function formatGenerationMetadata(durationMs) {
   if (durationMs > 1500) {
     const seconds = (durationMs / 1000).toFixed(1);
@@ -389,66 +410,22 @@ function isOverlyLiteral(code, text) {
   return normalizedCode.includes(normalizedText);
 }
 
-function extractHtml(responseText) {
-  if (!responseText) {
-    return null;
+function extractTextAndCode(raw) {
+  const s = String(raw ?? '');
+
+  const fence = s.match(/```(?:html|xml|svg|javascript|js|css)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    const code = fence[1].trim();
+    const text = s.slice(0, fence.index).trim();
+    return { text, code };
   }
 
-  const doctypeIndex = responseText.search(/<!doctype html/i);
-  const htmlIndex = responseText.search(/<html[\s>]/i);
-  const startIndexCandidates = [doctypeIndex, htmlIndex].filter(
-    (index) => index !== -1
-  );
-  if (startIndexCandidates.length === 0) {
-    const fencedMatch = responseText.match(/```html([\s\S]*?)```/i);
-    return fencedMatch ? fencedMatch[1].trim() : null;
+  const looksLikeHtml = /<!doctype html>|<html[\s>]|<script[\s>]/i.test(s);
+  if (looksLikeHtml) {
+    return { text: '', code: s.trim() };
   }
 
-  const startIndex = Math.min(...startIndexCandidates);
-  return responseText.slice(startIndex).trim();
-}
-
-function normalizeLLMOutput(raw) {
-  if (!raw) {
-    return raw;
-  }
-
-  if (raw.includes('"code"')) {
-    try {
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (typeof parsed.code === 'string') {
-          return parsed.code;
-        }
-      }
-    } catch (error) {
-      return raw;
-    }
-  }
-
-  return raw;
-}
-
-function extractChatText(responseText) {
-  if (!responseText) {
-    return '';
-  }
-
-  const doctypeIndex = responseText.search(/<!doctype html/i);
-  const htmlIndex = responseText.search(/<html[\s>]/i);
-  const startIndexCandidates = [doctypeIndex, htmlIndex].filter(
-    (index) => index !== -1
-  );
-  if (startIndexCandidates.length > 0) {
-    const startIndex = Math.min(...startIndexCandidates);
-    return responseText.slice(0, startIndex).trim();
-  }
-
-  return responseText
-    .replace(/```html[\s\S]*?```/gi, '')
-    .replace(/```json[\s\S]*?```/gi, '')
-    .trim();
+  return { text: s.trim(), code: '' };
 }
 
 function inferIntentFromText(userText) {
@@ -569,7 +546,8 @@ function handleLLMOutput(code, source = 'generated') {
   sandboxMode = getSandboxModeForExecution(analysis.executionProfile);
   lastRunCode = code;
   lastRunSource = source;
-  if (!sandboxFrame) {
+  const activeFrame = resetSandboxFrame();
+  if (!activeFrame) {
     appendOutput('Sandbox iframe missing.', 'error');
     return;
   }
@@ -739,7 +717,6 @@ async function sendChat() {
     return;
   }
 
-  const turnId = startChatTurn();
   const startedAt = performance.now();
   const resolvedIntent = resolveIntent(userInput);
   if (DEBUG_INTENT) {
@@ -765,12 +742,13 @@ async function sendChat() {
     '<em>Generating text + code…</em>',
     { pending: true }
   );
+  currentTurnMessageId = pendingMessageId;
 
   setStatusOnline(false);
   startLoading();
 
   let generationMetadata = '';
-  let normalizedReply = '';
+  let rawReply = '';
   try {
     const llmStartTime = performance.now();
     const systemPrompt = `You are a coding assistant.
@@ -808,73 +786,62 @@ Otherwise, respond with plain text.`;
     }
 
     setStatusOnline(true);
-    const reply = data?.choices?.[0]?.message?.content || 'No response.';
-    normalizedReply = normalizeLLMOutput(reply);
-    if (reply.includes('```json')) {
-      console.warn('⚠️ Model emitted JSON; ignoring structured output');
-    }
-    if (normalizedReply !== reply) {
-      console.warn('⚠️ Normalized LLM output from JSON wrapper');
-    }
+    rawReply = data?.choices?.[0]?.message?.content || 'No response.';
   } catch (error) {
-    updateMessage(
-      pendingMessageId,
-      '<em>⚠️ Something went wrong while generating the response.</em>'
-    );
+    finalizeChatOnce(pendingMessageId, {
+      text: '⚠️ Something went wrong while generating the response.',
+      ms: performance.now() - startedAt
+    });
     unlockChat();
     stopLoading();
     return;
   }
 
-  let extractedHtml = null;
   let extractedText = '';
+  let extractedCode = '';
   try {
-    extractedHtml = extractHtml(normalizedReply);
-    extractedText = extractChatText(normalizedReply);
+    const { text, code } = extractTextAndCode(rawReply);
+    extractedText = text;
+    extractedCode = code;
   } catch (error) {
     console.error('Post-generation parsing failed.', error);
+    extractedText = String(rawReply ?? '');
   }
 
-  const chatText =
-    extractedText || (extractedHtml ? 'Generated the updated interface.' : normalizedReply.trim());
-
-  const nextCode = extractedHtml;
-  const hasCode = Boolean(nextCode);
-
+  const hasCode = Boolean(extractedCode && extractedCode.trim());
   if (!hasCode) {
-    const assistantProposal = getAssistantProposal(chatText);
+    const assistantProposal = getAssistantProposal(extractedText);
     if (assistantProposal) {
       pendingAssistantProposal = assistantProposal;
     }
   }
 
-  finalizeChatOnce(turnId, () => {
-    const elapsed = performance.now() - startedAt;
-    const metadata = generationMetadata || formatGenerationMetadata(elapsed);
-
-    renderChatMessage(chatText ?? '', pendingMessageId);
-    appendChatMeta(metadata, pendingMessageId);
-
-    try {
-      if (hasCode) {
-        currentCode = nextCode;
-        setCodeFromLLM(nextCode);
-        pendingAssistantProposal = null;
-        runWhenPreviewReady(() => {
-          try {
-            handleLLMOutput(nextCode, 'generated');
-          } catch (error) {
-            console.error('Auto-run failed after generation.', error);
-            addExecutionWarning('Preview auto-run failed. Try Run Code.');
-            setPreviewExecutionStatus('error', 'PREVIEW ERROR');
-          }
-        });
-      }
-      updateGenerationIndicator();
-    } catch (error) {
-      console.error('Post-generation UI update failed.', error);
-    }
+  const elapsed = performance.now() - startedAt;
+  const metadataText = generationMetadata || formatGenerationMetadata(elapsed);
+  finalizeChatOnce(pendingMessageId, {
+    text: extractedText,
+    mode: metadataText
   });
+
+  try {
+    if (hasCode) {
+      currentCode = extractedCode;
+      setCodeFromLLM(extractedCode);
+      pendingAssistantProposal = null;
+      runWhenPreviewReady(() => {
+        try {
+          handleLLMOutput(extractedCode, 'generated');
+        } catch (error) {
+          console.error('Auto-run failed after generation.', error);
+          addExecutionWarning('Preview auto-run failed. Try Run Code.');
+          setPreviewExecutionStatus('error', 'PREVIEW ERROR');
+        }
+      });
+    }
+    updateGenerationIndicator();
+  } catch (error) {
+    console.error('Post-generation UI update failed.', error);
+  }
 
   unlockChat();
   stopLoading();
@@ -1046,7 +1013,7 @@ setPreviewExecutionStatus('ready', 'Ready');
 if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
   preview.once('ready', () => {
     console.assert(
-      currentTurnId === 0 || finalizedTurns.has(currentTurnId),
+      !currentTurnMessageId || chatFinalizeState.get(currentTurnMessageId)?.finalized,
       'Preview ready before chat finalized'
     );
   });
