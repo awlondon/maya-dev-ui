@@ -20,104 +20,9 @@ const BACKEND_URL =
   "https://text-code.primarydesigncompany.workers.dev";
 
 const defaultInterfaceCode = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Ambient Workspace</title>
-
-<style>
-  html, body {
-    margin: 0;
-    width: 100%;
-    height: 100%;
-    background: radial-gradient(circle at center, #0f172a, #020617);
-    overflow: hidden;
-    font-family: system-ui, sans-serif;
-  }
-
-  .field {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .core {
-    width: 220px;
-    height: 220px;
-    border-radius: 50%;
-    background:
-      radial-gradient(circle at center,
-        rgba(255,255,255,0.08),
-        rgba(255,255,255,0.02),
-        transparent 70%);
-    filter: blur(0.5px);
-    animation: breathe 6s ease-in-out infinite;
-    position: relative;
-  }
-
-  .core.active {
-    opacity: 1;
-    transform: scale(1.03);
-  }
-
-  @keyframes breathe {
-    0%   { transform: scale(0.98); opacity: 0.6; }
-    50%  { transform: scale(1.02); opacity: 0.85; }
-    100% { transform: scale(0.98); opacity: 0.6; }
-  }
-
-  .ripple {
-    position: absolute;
-    border-radius: 50%;
-    border: 1px solid rgba(255,255,255,0.15);
-    transform: scale(0);
-    opacity: 0.6;
-    animation: ripple 1.2s ease-out forwards;
-  }
-
-  @keyframes ripple {
-    to {
-      transform: scale(2.5);
-      opacity: 0;
-    }
-  }
-</style>
-</head>
-
+<html>
 <body>
-  <div class="field">
-    <div class="core" id="core"></div>
-  </div>
-
-<script>
-  const core = document.getElementById("core");
-  const field = document.querySelector(".field");
-
-  document.addEventListener("click", (e) => {
-    const ripple = document.createElement("div");
-    ripple.className = "ripple";
-    const rect = core.getBoundingClientRect();
-    ripple.style.width = rect.width + "px";
-    ripple.style.height = rect.height + "px";
-    ripple.style.left = rect.left + rect.width / 2 + "px";
-    ripple.style.top = rect.top + rect.height / 2 + "px";
-    ripple.style.position = "absolute";
-    ripple.style.transform = "translate(-50%, -50%) scale(0)";
-
-    field.appendChild(ripple);
-    core.classList.add("active");
-    setTimeout(() => {
-      core.classList.remove("active");
-    }, 300);
-
-    ripple.addEventListener("animationend", () => {
-      ripple.remove();
-    });
-  });
-</script>
+<div id="app"></div>
 </body>
 </html>`;
 
@@ -369,7 +274,7 @@ async function sendChat() {
     const messages = [
       {
         role: 'system',
-        content: `You are a conversational partner who maintains a living, expressive interface.
+        content: `You are a helpful conversational assistant.
 
 CRITICAL OUTPUT RULE:
 - You MUST return a single valid JSON object.
@@ -380,23 +285,16 @@ CRITICAL OUTPUT RULE:
 
 Schema:
 {
-  "text": "A natural, human conversational response.",
-  "code": "A complete, self-contained HTML/CSS/JS document."
+  "text": "Normal conversational response to the user.",
+  "code": "A complete HTML/CSS/JS document."
 }
 
-Behavior rules:
-- Respond naturally and conversationally in the "text" field.
+Rules:
+- Respond naturally in the "text" field.
 - Always include the "code" field.
-- Always return a complete HTML/CSS/JS document by modifying or extending the existing interface.
-- Treat the existing interface as a responsive workspace or field.
-- Prefer ambient, structural, or kinetic changes over representational characters or literal symbols.
-- Prefer modifying behavior, motion, or interaction over replacing the interface.
-- Do NOT simply render user text unless explicitly asked.
-- The interface is an expressive gesture, not a transcript.
-- Static text-only interfaces should be avoided unless necessary.
-- Do NOT explain the code unless the user explicitly asks.
-- If you mention interface changes without being asked, keep it brief and parenthetical.
-- The interface may remain unchanged if no update is needed.`
+- The code may remain unchanged if no update is useful.
+- Do not explain the code unless asked.
+- Prefer minimal changes to code unless the user intent clearly benefits from an interface.`
       },
       {
         role: 'user',
