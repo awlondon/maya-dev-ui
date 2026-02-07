@@ -105,22 +105,38 @@ function runGeneratedCode(code) {
   }, 150);
 }
 
-function injectEscListener(html) {
-  const escScript = `
-<script>
-  window.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') {
-      window.parent.postMessage('exit-fullscreen', '*');
-    }
-  });
-</script>
-`;
+function ensureFullHtmlDoc(html) {
+  const hasHtml = /<html[\\s>]/i.test(html);
+  const hasBody = /<body[\\s>]/i.test(html);
 
-  if (html.includes('</body>')) {
-    return html.replace('</body>', `${escScript}\n</body>`);
+  if (hasHtml && hasBody) {
+    return html;
   }
 
-  return `${html}${escScript}`;
+  return `<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+${html}
+</body>
+</html>`;
+}
+
+function injectEscListener(rawHtml) {
+  const html = ensureFullHtmlDoc(rawHtml);
+  const escScript = `
+<script>
+  (function () {
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        document.body.insertAdjacentHTML('afterbegin','<div style="position:fixed;top:8px;left:8px;z-index:99999;background:#ff0;padding:6px">ESC DETECTED</div>');
+        window.parent.postMessage({ type: 'exit-fullscreen' }, '*');
+      }
+    }, true);
+  })();
+</script>
+`;
+  return html.replace(/<\/body>/i, `${escScript}\n</body>`);
 }
 
 function updateGenerationIndicator() {
@@ -277,7 +293,11 @@ if (fullscreenToggle && consolePane) {
   });
 
   window.addEventListener('message', (event) => {
-    if (event.data === 'exit-fullscreen') {
+    if (event.source !== previewFrame?.contentWindow) {
+      return;
+    }
+
+    if (event.data && event.data.type === 'exit-fullscreen') {
       if (consolePane.classList.contains('preview-fullscreen')) {
         exitFullscreen();
       }
