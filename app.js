@@ -187,11 +187,11 @@ function renderAssistantMessage(messageId, text, metadata) {
   const safeText =
     (typeof text === 'string' && text.trim().length)
       ? text.trim()
-      : 'Generated output.';
+      : '';
 
   if (messageId) {
-    updateMessage(messageId, formatAssistantHtml(safeText));
-  } else {
+    updateMessage(messageId, safeText ? formatAssistantHtml(safeText) : '');
+  } else if (safeText) {
     appendMessage('assistant', safeText);
   }
 
@@ -447,7 +447,7 @@ function isOverlyLiteral(code, text) {
 }
 
 function extractTextAndCode(raw) {
-  const s = String(raw ?? '');
+  const s = String(raw ?? '').trim();
 
   const fence = s.match(/```(?:html|xml|svg|javascript|js|css)?\s*([\s\S]*?)```/i);
   if (fence) {
@@ -458,10 +458,19 @@ function extractTextAndCode(raw) {
 
   const looksLikeHtml = /<!doctype html>|<html[\s>]|<script[\s>]/i.test(s);
   if (looksLikeHtml) {
-    return { text: 'Generated the updated interface.', code: s.trim() };
+    let text = '';
+    let code = s;
+
+    const chatMatch = code.match(/^<!--\s*CHAT:\s*([\s\S]*?)\s*-->\s*/i);
+    if (chatMatch) {
+      text = (chatMatch[1] || '').trim();
+      code = code.slice(chatMatch[0].length).trim();
+    }
+
+    return { text, code };
   }
 
-  return { text: s.trim(), code: '' };
+  return { text: s, code: '' };
 }
 
 function inferIntentFromText(userText) {
@@ -821,11 +830,13 @@ async function sendChat() {
   try {
     const llmStartTime = performance.now();
     const systemPrompt = `You are a coding assistant.
-When the user asks to draw or create something visual,
-output a complete HTML document.
-Do not use JSON.
-Do not use code fences.
-Otherwise, respond with plain text.`;
+
+Output rules:
+- Never output JSON, YAML, or code fences.
+- If you return HTML, the FIRST line must be:
+  <!--CHAT: <a short conversational message for the user> -->
+  Then output a complete HTML document.
+- If no HTML is needed, output plain conversational text only.`;
 
     const messages = [
       {
@@ -877,6 +888,9 @@ Otherwise, respond with plain text.`;
   }
 
   const hasCode = Boolean(extractedCode && extractedCode.trim());
+  if (hasCode && (!extractedText || !extractedText.trim())) {
+    extractedText = `Okay — I generated and ran an updated interface for: “${userInput}”.`;
+  }
   if (!hasCode) {
     const assistantProposal = getAssistantProposal(extractedText);
     if (assistantProposal) {
