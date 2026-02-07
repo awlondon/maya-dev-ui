@@ -167,6 +167,18 @@ function isOverlyLiteral(code, text) {
   return normalizedCode.includes(normalizedText);
 }
 
+function extractHtml(responseText) {
+  const match = responseText.match(/```html([\s\S]*?)```/i);
+  return match ? match[1].trim() : null;
+}
+
+function extractChatText(responseText) {
+  return responseText
+    .replace(/```html[\s\S]*?```/gi, '')
+    .replace(/```json[\s\S]*?```/gi, '')
+    .trim();
+}
+
 function buildWrappedPrompt(userInput, currentCode) {
   if (!currentCode) {
     return userInput;
@@ -355,28 +367,17 @@ async function sendChat() {
   try {
     const systemBase = `You are a helpful conversational assistant.
 
-You must return a single valid JSON object.
-No text outside JSON.
-
-Schema:
-{
-  "text": "Normal conversational response.",
-  "code": "Complete HTML/CSS/JS document.",
-  "code_unchanged": true | false
-}
-
-Rules:
-- Always include all fields.
-- Code may remain unchanged.
-- Do not explain code unless asked.
-- Prefer minimal output.
-- If no code changes are needed, set "code_unchanged": true and repeat the previous code verbatim.`;
+If you generate code, include it in a single \`\`\`html code block.
+Do not include JSON, metadata, or explanations inside the code block.
+Do not output JSON wrappers or transport metadata.`;
     const systemMessage = codeIntent
-      ? systemBase
+      ? `${systemBase}
+
+When making interface changes, respond with plain text plus an optional \`\`\`html code block for the full HTML.`
       : `${systemBase}
 
 Additional instruction:
-The user's message does not require interface changes. Do not modify the code unless absolutely necessary.`;
+The user's message does not require interface changes. Respond with plain text only unless absolutely necessary.`;
 
     const messages = [
       {
@@ -403,47 +404,39 @@ The user's message does not require interface changes. Do not modify the code un
 
     setStatusOnline(true);
     const reply = data?.choices?.[0]?.message?.content || 'No response.';
-    let parsed;
-    try {
-      parsed = JSON.parse(reply);
-    } catch {
-      updateMessage(pendingMessageId, formatAssistantHtml(reply.trim()));
-      if (interfaceStatus) {
-        interfaceStatus.textContent = 'Interface unchanged';
-        interfaceStatus.className = 'interface-status unchanged';
-      }
-      return;
+    if (reply.includes('```json')) {
+      console.warn('⚠️ Model emitted JSON; ignoring structured output');
     }
 
-    if (!parsed.text || !parsed.code || typeof parsed.code_unchanged !== 'boolean') {
-      updateMessage(pendingMessageId, '⚠️ Response missing required fields.');
-      return;
+    let extractedHtml = extractHtml(reply);
+    const extractedText = extractChatText(reply);
+    const chatText = extractedText || (extractedHtml ? '' : reply.trim());
+
+    if (chatText) {
+      renderAssistantText(chatText, pendingMessageId);
+    } else {
+      updateMessage(pendingMessageId, '');
     }
 
-    if (!codeIntent) {
-      parsed.code = currentCode;
-      parsed.code_unchanged = true;
-    }
+    let nextCode = codeIntent ? extractedHtml : null;
+    const hasCode = Boolean(nextCode);
 
-    if (isOverlyLiteral(parsed.code, parsed.text)) {
+    if (hasCode && isOverlyLiteral(nextCode, extractedText)) {
       console.warn('⚠️ Literal UI detected — consider prompting expressive response');
     }
 
     if (
-      codeIntent
+      hasCode
       && intentInfo.source === 'artifact-default'
-      && parsed.code.trim().length < 50
+      && nextCode.trim().length < 50
     ) {
       console.warn('⚠️ Refusing to render trivial HTML');
-      parsed.code = currentCode;
-      parsed.code_unchanged = true;
+      extractedHtml = null;
+      nextCode = null;
     }
 
-    renderAssistantText(parsed.text, pendingMessageId);
     stopLoading();
-    const codeUnchanged = parsed.code_unchanged === true;
-    const nextCode = parsed.code;
-    let codeChanged = !codeUnchanged && Boolean(nextCode && nextCode !== currentCode);
+    let codeChanged = Boolean(nextCode && nextCode !== currentCode);
     if (codeChanged && editorDirty) {
       console.warn('⚠️ Editor modified by user; not overwriting code');
       codeChanged = false;
