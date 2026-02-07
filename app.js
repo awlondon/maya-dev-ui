@@ -189,9 +189,23 @@ function runGeneratedCode(code) {
   }
   outputPanel?.classList.add('loading');
   setTimeout(() => {
-    previewFrame.srcdoc = code;
+    renderToIframe(code);
     outputPanel?.classList.remove('loading');
   }, 150);
+}
+
+function renderToIframe(html) {
+  if (!previewFrame) {
+    return;
+  }
+
+  const nonce = Date.now();
+  const wrappedHtml = `<!-- generation:${nonce} -->\n${html}`;
+
+  previewFrame.srcdoc = '<!doctype html><html><body></body></html>';
+  requestAnimationFrame(() => {
+    previewFrame.srcdoc = wrappedHtml;
+  });
 }
 
 function updateGenerationIndicator() {
