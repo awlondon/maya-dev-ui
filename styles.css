@@ -85,14 +85,12 @@ html, body {
   cursor: pointer;
 }
 
-.credit-badge-text {
-  display: inline-flex;
-  gap: 4px;
-  align-items: center;
+.credit-badge .icon {
+  font-size: 12px;
 }
 
-.credit-badge-label {
-  color: var(--muted);
+.credit-badge .count {
+  color: var(--text);
 }
 
 .credit-badge:hover .credit-badge-tooltip {
@@ -119,12 +117,12 @@ html, body {
   z-index: 10;
 }
 
-.credit-badge--warn {
+.credit-badge.warn {
   border-color: rgba(251, 191, 36, 0.6);
   color: #fbbf24;
 }
 
-.credit-badge--critical {
+.credit-badge.low {
   border-color: rgba(248, 113, 113, 0.6);
   color: #f87171;
 }
@@ -168,6 +166,11 @@ html, body {
 
 .credit-meter {
   position: relative;
+  display: grid;
+  gap: 6px;
+}
+
+.credit-meter .bar {
   background: #0b0b14;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -175,19 +178,17 @@ html, body {
   overflow: hidden;
 }
 
-.credit-meter-fill {
+.credit-meter .fill {
   height: 100%;
   background: linear-gradient(90deg, rgba(124, 155, 255, 0.4), rgba(124, 155, 255, 0.9));
   width: 0%;
   transition: width 0.3s ease;
 }
 
-.credit-meter-label {
-  position: absolute;
-  inset: 0;
+.credit-meter .label {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
   font-size: 11px;
   color: var(--text);
   letter-spacing: 0.02em;
@@ -482,7 +483,8 @@ html, body {
 
 .credit-banner,
 .credit-inline-warning,
-.credit-zero {
+.credit-zero,
+.throttle {
   width: 100%;
   font-size: 12.5px;
   border-radius: 8px;
@@ -502,6 +504,12 @@ html, body {
   color: #fde68a;
 }
 
+.throttle {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #bfdbfe;
+}
+
 .credit-zero {
   display: flex;
   align-items: center;
@@ -519,7 +527,8 @@ html, body {
 
 .credit-inline-warning.hidden,
 .credit-banner.hidden,
-.credit-zero.hidden {
+.credit-zero.hidden,
+.throttle.hidden {
   display: none;
 }
 
@@ -1301,10 +1310,6 @@ button:disabled {
 }
 
 @media (max-width: 640px) {
-  .credit-badge-label {
-    display: none;
-  }
-
   .credit-badge {
     padding: 6px 8px;
   }

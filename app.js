@@ -6,10 +6,10 @@ const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
 const creditPreviewEl = document.getElementById('credit-preview');
 const micButton = document.getElementById('btn-mic');
-const creditBadge = document.getElementById('credit-badge');
+const creditBadge = document.getElementById('creditBadge');
 const creditPanel = document.getElementById('credit-panel');
-const creditMeterFill = document.querySelector('.credit-meter-fill');
-const creditMeterLabel = document.querySelector('.credit-meter-label');
+const creditMeterFill = document.querySelector('.credit-meter .fill');
+const creditMeterLabel = document.querySelector('.credit-meter .label');
 const creditResetLabel = document.getElementById('credit-reset');
 const creditDailyLimitLabel = document.getElementById('credit-daily-limit');
 const creditInlineWarning = document.getElementById('credit-inline-warning');
@@ -17,6 +17,7 @@ const creditBanner = document.getElementById('credit-banner');
 const creditZero = document.getElementById('credit-zero');
 const creditDailyMessage = document.getElementById('credit-daily-message');
 const creditUpgradeNudge = document.getElementById('credit-upgrade-nudge');
+const throttleNotice = document.getElementById('throttleNotice');
 const usageModal = document.getElementById('usage-modal');
 const usageCloseButton = document.getElementById('usage-close');
 const usageTabs = document.querySelectorAll('.usage-tab');
@@ -125,6 +126,7 @@ const HARD_WARNING_THRESHOLD = 0.1;
 const UPGRADE_NUDGE_KEY = 'mayaUpgradeNudgeShown';
 const LOW_CREDIT_WARNING_KEY = 'mayaLowCreditWarningShown';
 const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+const ANALYTICS_CACHE_TTL_MS = 45 * 1000;
 const USAGE_RANGE_STEPS = [14, 30, 60, 90];
 const PLAN_DAILY_CAPS = {
   free: 100,
@@ -149,6 +151,11 @@ const usageCache = {
   userRows: null
 };
 
+const analyticsCache = {
+  fetchedAt: 0,
+  data: null
+};
+
 const sessionId = (() => {
   if (typeof window === 'undefined') {
     return '';
@@ -163,6 +170,11 @@ const sessionId = (() => {
   window.sessionStorage?.setItem('mayaSessionId', created);
   return created;
 })();
+
+const isDev = window.location.hostname === 'localhost'
+  || window.location.hostname === '127.0.0.1';
+
+let lastThrottleState = { state: 'ok', remaining: 0 };
 
 async function copyToClipboard(text) {
   try {
@@ -223,6 +235,28 @@ function getCreditState() {
   };
 }
 
+function computeThrottleState({
+  creditsUsedToday,
+  dailyLimit,
+  estimatedNextCost
+}) {
+  if (creditsUsedToday >= dailyLimit) {
+    return { state: 'blocked', remaining: 0 };
+  }
+
+  if (creditsUsedToday + estimatedNextCost > dailyLimit) {
+    return {
+      state: 'warning',
+      remaining: Math.max(0, dailyLimit - creditsUsedToday)
+    };
+  }
+
+  return {
+    state: 'ok',
+    remaining: dailyLimit - creditsUsedToday
+  };
+}
+
 function getUserContext() {
   const root = document.getElementById('root');
   const remainingCredits = Number.parseInt(root?.dataset.remainingCredits ?? '', 10);
@@ -235,6 +269,59 @@ function getUserContext() {
     dailyLimit: Number.isFinite(dailyLimit) ? dailyLimit : null,
     todayCreditsUsed: Number.isFinite(todayCreditsUsed) ? todayCreditsUsed : null
   };
+}
+
+function parseAnalyticsSummary(payload) {
+  const summary = payload?.summary ?? payload?.analytics ?? payload?.data ?? payload ?? {};
+  const dailyLimit = Number(summary.daily_limit ?? summary.dailyLimit);
+  const creditsUsedToday = Number(
+    summary.credits_used_today
+    ?? summary.creditsUsedToday
+    ?? summary.credits_used
+    ?? summary.creditsUsed
+  );
+  return {
+    dailyLimit: Number.isFinite(dailyLimit) ? dailyLimit : null,
+    creditsUsedToday: Number.isFinite(creditsUsedToday) ? creditsUsedToday : null
+  };
+}
+
+function applyAnalyticsSummary(summary) {
+  const root = document.getElementById('root');
+  if (!root || !summary) {
+    return;
+  }
+  if (Number.isFinite(summary.dailyLimit)) {
+    root.dataset.dailyLimit = `${summary.dailyLimit}`;
+  }
+  if (Number.isFinite(summary.creditsUsedToday)) {
+    root.dataset.todayCreditsUsed = `${summary.creditsUsedToday}`;
+  }
+}
+
+async function fetchUsageAnalytics({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && analyticsCache.data && now - analyticsCache.fetchedAt < ANALYTICS_CACHE_TTL_MS) {
+    return analyticsCache.data;
+  }
+
+  const context = getUserContext();
+  if (!context.id) {
+    return null;
+  }
+
+  const res = await fetch(`/usage/analytics?user_id=${encodeURIComponent(context.id)}&days=1`, {
+    cache: 'no-store'
+  });
+
+  if (!res.ok) {
+    return null;
+  }
+
+  const data = await res.json();
+  analyticsCache.data = data;
+  analyticsCache.fetchedAt = now;
+  return data;
 }
 
 function parseCsvRow(row) {
@@ -877,6 +964,23 @@ function estimateCreditsPreview({ userInput, currentCode, intentType }) {
   return estimateCreditRange(totalTokens);
 }
 
+function getEstimatedNextCost() {
+  if (!chatInput) {
+    return 0;
+  }
+  const userText = chatInput.value.trim();
+  if (!userText) {
+    return 0;
+  }
+  const resolvedIntent = resolveIntent(userText);
+  const { max } = estimateCreditsPreview({
+    userInput: userText,
+    currentCode,
+    intentType: resolvedIntent.type
+  });
+  return max;
+}
+
 function formatCreditPreview({ min, max, intentType, creditState }) {
   const intentLabel = intentType === 'code' ? 'visual generation' : 'chat';
   let text = `≈ ${min}–${max} credits · ${intentLabel}`;
@@ -960,39 +1064,45 @@ function getCreditPercent(remaining, total) {
   return Math.max(0, Math.min(remaining / total, 1));
 }
 
-function updateCreditBadge(state) {
+function updateCreditBadge({ remaining, total, plan }) {
   if (!creditBadge) {
     return;
   }
-  const iconEl = creditBadge.querySelector('.credit-badge-icon');
-  const countEl = creditBadge.querySelector('.credit-badge-count');
-  const isFree = state.isFreeTier;
-  const isCompact = window.matchMedia?.('(max-width: 640px)').matches;
+  const iconEl = creditBadge.querySelector('.icon');
+  const countEl = creditBadge.querySelector('.count');
   if (iconEl) {
-    iconEl.textContent = isCompact ? '●' : (isFree ? '🟢' : '💎');
+    iconEl.textContent = plan?.toLowerCase() === 'free' ? '🟢' : '💎';
   }
-  if (countEl) {
-    countEl.textContent = formatCreditNumber(state.remainingCredits);
+  if (countEl && Number.isFinite(remaining)) {
+    countEl.textContent = `${remaining.toLocaleString()} credits`;
   }
-  const percent = getCreditPercent(state.remainingCredits, state.creditsTotal);
-  creditBadge.classList.remove('credit-badge--warn', 'credit-badge--critical');
-  if (percent < 0.2) {
-    creditBadge.classList.add('credit-badge--critical');
-  } else if (percent < 0.5) {
-    creditBadge.classList.add('credit-badge--warn');
+  if (Number.isFinite(remaining) && Number.isFinite(total) && total > 0) {
+    const ratio = remaining / total;
+    creditBadge.classList.toggle('low', ratio < 0.2);
+    creditBadge.classList.toggle('warn', ratio < 0.4);
+  } else {
+    creditBadge.classList.remove('low', 'warn');
   }
+}
+
+function updateCreditMeter({ remaining, total }) {
+  if (!creditMeterFill || !creditMeterLabel) {
+    return;
+  }
+  const pct = total > 0 ? Math.max(0, Math.min(1, remaining / total)) : 0;
+  creditMeterFill.style.width = `${pct * 100}%`;
+  creditMeterLabel.textContent = `${remaining} / ${total}`;
 }
 
 function updateCreditPanel(state) {
   if (!creditPanel) {
     return;
   }
-  const percent = getCreditPercent(state.remainingCredits, state.creditsTotal);
-  if (creditMeterFill) {
-    creditMeterFill.style.width = `${percent * 100}%`;
-  }
-  if (creditMeterLabel) {
-    creditMeterLabel.textContent = `${formatCreditNumber(state.remainingCredits)} / ${formatCreditNumber(state.creditsTotal)}`;
+  if (Number.isFinite(state.remainingCredits) && Number.isFinite(state.creditsTotal)) {
+    updateCreditMeter({
+      remaining: state.remainingCredits,
+      total: state.creditsTotal
+    });
   }
   if (creditResetLabel && Number.isFinite(state.resetDays)) {
     creditResetLabel.textContent = `Resets in ${state.resetDays} days`;
@@ -1002,23 +1112,18 @@ function updateCreditPanel(state) {
   }
 }
 
-function shouldShowUpgradeNudge(state) {
-  const percent = getCreditPercent(state.remainingCredits, state.creditsTotal);
-  const dailyCapHit = Number.isFinite(state.dailyLimit)
-    && Number.isFinite(state.todayCreditsUsed)
-    && state.todayCreditsUsed >= state.dailyLimit;
-  const blocked = state.remainingCredits !== null && state.remainingCredits <= 0;
-  return percent < 0.2 || dailyCapHit || blocked;
+function shouldShowUpgradeNudge(state, throttle) {
+  const blockedByThrottle = throttle?.state === 'blocked';
+  const blockedByCredits = state.remainingCredits !== null && state.remainingCredits <= 0;
+  return blockedByThrottle || blockedByCredits;
 }
 
-function updateCreditAlerts(state) {
+function updateCreditAlerts(state, throttle) {
   if (!creditInlineWarning || !creditBanner || !creditZero) {
     return;
   }
   const percent = getCreditPercent(state.remainingCredits, state.creditsTotal);
-  const dailyCapHit = Number.isFinite(state.dailyLimit)
-    && Number.isFinite(state.todayCreditsUsed)
-    && state.todayCreditsUsed >= state.dailyLimit;
+  const dailyCapHit = throttle?.state === 'blocked';
   const outOfCredits = state.remainingCredits !== null && state.remainingCredits <= 0;
 
   if (outOfCredits) {
@@ -1051,15 +1156,6 @@ function updateCreditAlerts(state) {
     creditBanner.classList.add('hidden');
   }
 
-  if (dailyCapHit) {
-    const resetTime = state.dailyResetTime || 'tomorrow';
-    creditInlineWarning.textContent = `⏳ Daily limit reached. More credits unlock in ${resetTime}.`;
-    creditInlineWarning.classList.remove('hidden');
-    if (!state.isFreeTier) {
-      creditInlineWarning.innerHTML = `⏳ Daily limit reached. More credits unlock in ${resetTime}. <span class="credit-link">Need more today? Buy a top-up →</span>`;
-    }
-  }
-
   if (creditDailyMessage) {
     if (dailyCapHit) {
       const resetTime = state.dailyResetTime || 'tomorrow';
@@ -1071,20 +1167,111 @@ function updateCreditAlerts(state) {
   }
 
   if (creditUpgradeNudge) {
-    if (shouldShowUpgradeNudge(state) && !window.sessionStorage?.getItem(UPGRADE_NUDGE_KEY)) {
+    if (shouldShowUpgradeNudge(state, throttle) && !window.sessionStorage?.getItem(UPGRADE_NUDGE_KEY)) {
       creditUpgradeNudge.classList.remove('hidden');
       window.sessionStorage?.setItem(UPGRADE_NUDGE_KEY, 'true');
-    } else if (!shouldShowUpgradeNudge(state)) {
+    } else if (!shouldShowUpgradeNudge(state, throttle)) {
       creditUpgradeNudge.classList.add('hidden');
     }
   }
 }
 
+function updateThrottleUI(throttle) {
+  if (!throttleNotice) {
+    return;
+  }
+
+  if (throttle.state === 'ok') {
+    throttleNotice.classList.add('hidden');
+    return;
+  }
+
+  throttleNotice.classList.remove('hidden');
+
+  if (throttle.state === 'warning') {
+    throttleNotice.textContent = `⏳ About ${throttle.remaining} credits left today.`;
+  }
+
+  if (throttle.state === 'blocked') {
+    throttleNotice.textContent = 'Daily limit reached. More credits unlock at 00:00 UTC.';
+  }
+}
+
+function updateSendButton(throttle) {
+  if (!sendButton) {
+    return;
+  }
+
+  if (chatState?.locked) {
+    sendButton.disabled = true;
+    return;
+  }
+
+  const creditState = getCreditState();
+  if (creditState.remainingCredits !== null && creditState.remainingCredits <= 0) {
+    sendButton.disabled = true;
+    sendButton.title = 'Out of credits';
+    return;
+  }
+
+  if (throttle.state === 'blocked') {
+    sendButton.disabled = true;
+    sendButton.title = 'Daily credit limit reached';
+  } else {
+    sendButton.disabled = false;
+    sendButton.title = '';
+  }
+
+  if (isDev) {
+    console.assert(
+      throttle.state !== 'blocked' || sendButton.disabled,
+      'Blocked throttle must disable send'
+    );
+  }
+}
+
+function updateThrottleState({ estimatedNextCost = 0 } = {}) {
+  const state = getCreditState();
+  if (!Number.isFinite(state.dailyLimit) || state.dailyLimit <= 0) {
+    lastThrottleState = { state: 'ok', remaining: 0 };
+    updateThrottleUI(lastThrottleState);
+    updateSendButton(lastThrottleState);
+    return lastThrottleState;
+  }
+
+  const throttle = computeThrottleState({
+    creditsUsedToday: Number.isFinite(state.todayCreditsUsed) ? state.todayCreditsUsed : 0,
+    dailyLimit: state.dailyLimit,
+    estimatedNextCost
+  });
+
+  lastThrottleState = throttle;
+  updateThrottleUI(throttle);
+  updateSendButton(throttle);
+  return throttle;
+}
+
+async function refreshAnalyticsAndThrottle({ force = false } = {}) {
+  const data = await fetchUsageAnalytics({ force });
+  if (!data) {
+    return null;
+  }
+  const summary = parseAnalyticsSummary(data);
+  applyAnalyticsSummary(summary);
+  updateThrottleState({ estimatedNextCost: 0 });
+  updateCreditUI();
+  return summary;
+}
+
 function updateCreditUI() {
   const state = getCreditState();
-  updateCreditBadge(state);
+  updateCreditBadge({
+    remaining: state.remainingCredits ?? 0,
+    total: state.creditsTotal ?? 0,
+    plan: state.planLabel
+  });
   updateCreditPanel(state);
-  updateCreditAlerts(state);
+  updateCreditAlerts(state, lastThrottleState);
 }
 
 function debounce(fn, delayMs) {
@@ -1100,6 +1287,9 @@ function debounce(fn, delayMs) {
 }
 
 const requestCreditPreviewUpdate = debounce(() => updateCreditPreview(), 250);
+const requestThrottleUpdate = debounce(() => {
+  updateThrottleState({ estimatedNextCost: getEstimatedNextCost() });
+}, 200);
 
 codeEditor.value = defaultInterfaceCode;
 let currentCode = defaultInterfaceCode;
@@ -1897,38 +2087,46 @@ function formatGenerationMetadata(durationMs) {
   return `Generated in ${Math.round(durationMs)} ms · Auto-run enabled`;
 }
 
-function formatUsageMetadata(usage, context) {
+function formatUsageMetadata(usage, context, throttle) {
   if (!usage || !Number.isFinite(usage.creditsCharged)) {
     return { usageText: '', warningText: '' };
   }
-  const pieces = [`Used ${usage.creditsCharged} credits`];
-  if (Number.isFinite(usage.remainingCredits)) {
-    pieces.push(`${usage.remainingCredits} remaining`);
-    if (usage.remainingCredits <= LOW_CREDIT_WARNING_THRESHOLD) {
-      pieces.push(`⚠️ ${usage.remainingCredits} runs remaining this month`);
-    }
-  }
-  const usageText = `— ${pieces.join(' · ')}`;
+  const creditsRemaining = Number.isFinite(usage.remainingCredits)
+    ? usage.remainingCredits
+    : Number.isFinite(context?.remainingCredits)
+      ? context.remainingCredits
+      : null;
+  const usageText = creditsRemaining !== null
+    ? `— Used ${usage.creditsCharged} credits · ${creditsRemaining} remaining`
+    : `— Used ${usage.creditsCharged} credits`;
+
   let warningText = '';
-  if (context?.dailyLimit && Number.isFinite(context.dailyLimit) && context.dailyLimit > 0) {
-    const percent = Math.round((usage.creditsCharged / context.dailyLimit) * 100);
-    if (percent >= 18) {
-      warningText = `⚠️ Large generation · ${percent}% of daily limit`;
-    }
+  if (throttle?.state === 'warning' || throttle?.state === 'blocked') {
+    const remainingToday = Math.max(
+      0,
+      (context?.dailyLimit ?? 0) - (context?.todayCreditsUsed ?? 0)
+    );
+    warningText = `⚠️ ${remainingToday} credits left today`;
   }
+
   return { usageText, warningText };
 }
 
 function applyUsageToCredits(usage) {
-  if (!usage || !Number.isFinite(usage.remainingCredits)) {
+  if (!usage) {
+    return;
+  }
+  const remainingCredits = Number(usage.remainingCredits ?? usage.credits_remaining);
+  const creditsCharged = Number(usage.creditsCharged ?? usage.credits_charged);
+  if (!Number.isFinite(remainingCredits)) {
     return;
   }
   const root = document.getElementById('root');
   if (root) {
-    root.dataset.remainingCredits = usage.remainingCredits;
-    if (Number.isFinite(usage.creditsCharged)) {
+    root.dataset.remainingCredits = `${remainingCredits}`;
+    if (Number.isFinite(creditsCharged)) {
       const currentUsed = Number.parseInt(root.dataset.todayCreditsUsed ?? '0', 10);
-      const updatedUsed = Number.isFinite(currentUsed) ? currentUsed + usage.creditsCharged : usage.creditsCharged;
+      const updatedUsed = Number.isFinite(currentUsed) ? currentUsed + creditsCharged : creditsCharged;
       root.dataset.todayCreditsUsed = `${updatedUsed}`;
     }
   }
@@ -2279,7 +2477,7 @@ function unlockChat() {
     clearTimeout(chatState.unlockTimerId);
     chatState.unlockTimerId = null;
   }
-  setSendDisabled(false);
+  updateSendButton(lastThrottleState);
 }
 
 function lockChat() {
@@ -2298,6 +2496,12 @@ function lockChat() {
 
 async function sendChat() {
   if (chatState.locked) {
+    return;
+  }
+
+  const throttle = updateThrottleState({ estimatedNextCost: getEstimatedNextCost() });
+  if (throttle.state === 'blocked') {
+    updateCreditUI();
     return;
   }
 
@@ -2407,10 +2611,12 @@ Output rules:
 
     setStatusOnline(true);
     rawReply = data?.choices?.[0]?.message?.content || 'No response.';
-    usageMetadata = formatUsageMetadata(data?.usage, getCreditState());
     applyUsageToCredits(data?.usage);
+    const throttleSnapshot = updateThrottleState({ estimatedNextCost: 0 });
+    usageMetadata = formatUsageMetadata(data?.usage, getCreditState(), throttleSnapshot);
     updateCreditPreview({ force: true });
     updateCreditUI();
+    await refreshAnalyticsAndThrottle({ force: true });
     generationFeedback.stop();
   } catch (error) {
     generationFeedback.stop();
@@ -2497,6 +2703,7 @@ chatForm.addEventListener('submit', (event) => {
 if (chatInput) {
   chatInput.addEventListener('input', () => {
     requestCreditPreviewUpdate();
+    requestThrottleUpdate();
   });
 }
 
@@ -2517,6 +2724,17 @@ if (creditBadge && creditPanel) {
       openCreditPanel();
     } else {
       closeCreditPanel();
+    }
+  });
+
+  creditBadge.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      if (creditPanel.classList.contains('hidden')) {
+        openCreditPanel();
+      } else {
+        closeCreditPanel();
+      }
     }
   });
 
@@ -2609,7 +2827,12 @@ if (usageFilters) {
 }
 
 window.addEventListener('resize', () => {
-  updateCreditBadge(getCreditState());
+  const state = getCreditState();
+  updateCreditBadge({
+    remaining: state.remainingCredits ?? 0,
+    total: state.creditsTotal ?? 0,
+    plan: state.planLabel
+  });
 });
 
 codeEditor.addEventListener('input', () => {
@@ -2702,6 +2925,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   updateCreditUI();
+  refreshAnalyticsAndThrottle({ force: false }).catch((error) => {
+    console.warn('Usage analytics refresh failed.', error);
+  });
 });
 
 codeEditor.addEventListener('keydown', (event) => {
