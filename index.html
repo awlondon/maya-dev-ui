@@ -20,6 +20,12 @@
         <div class="panel-header">Chat</div>
         <div id="chat-messages" class="panel-body"></div>
         <form id="chat-form" class="panel-footer">
+          <div id="loadingIndicator" class="loading hidden">
+            <span class="dot">•</span>
+            <span class="dot">•</span>
+            <span class="dot">•</span>
+            <span class="timer">0.0s</span>
+          </div>
           <textarea id="chat-input" placeholder="Ask the model something..."></textarea>
           <button id="btn-send" type="submit">Send Chat</button>
         </form>

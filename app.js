@@ -15,6 +15,7 @@ const outputPanel = document.getElementById('output-panel');
 const fullscreenToggle = document.getElementById('fullscreenToggle');
 const interfaceStatus = document.getElementById('interfaceStatus');
 const viewDiffBtn = document.getElementById('viewDiffBtn');
+const loadingIndicator = document.getElementById('loadingIndicator');
 const BACKEND_URL =
   "https://text-code.primarydesigncompany.workers.dev";
 
@@ -22,6 +23,8 @@ codeEditor.value = `// Write JavaScript here to experiment with the editor.\n\nc
 let currentCode = null;
 let previousCode = null;
 let lastUserIntent = null;
+let loadingStartTime = null;
+let loadingInterval = null;
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
@@ -150,6 +153,42 @@ function simpleLineDiff(oldCode, newCode) {
     .join('\n');
 }
 
+function startLoading() {
+  if (!loadingIndicator) {
+    return;
+  }
+  const timerEl = loadingIndicator.querySelector('.timer');
+  if (!timerEl) {
+    return;
+  }
+
+  if (loadingInterval) {
+    clearInterval(loadingInterval);
+  }
+
+  loadingStartTime = performance.now();
+  loadingIndicator.classList.remove('hidden');
+  timerEl.textContent = '0.0s';
+
+  loadingInterval = setInterval(() => {
+    const elapsed = (performance.now() - loadingStartTime) / 1000;
+    timerEl.textContent = `${elapsed.toFixed(1)}s`;
+  }, 100);
+}
+
+function stopLoading() {
+  if (!loadingIndicator) {
+    return;
+  }
+  loadingIndicator.classList.add('hidden');
+
+  if (loadingInterval) {
+    clearInterval(loadingInterval);
+  }
+  loadingInterval = null;
+  loadingStartTime = null;
+}
+
 async function sendChat() {
   const prompt = chatInput.value.trim();
   if (!prompt) {
@@ -163,6 +202,7 @@ async function sendChat() {
 
   sendButton.disabled = true;
   setStatusOnline(false);
+  startLoading();
 
   try {
     const messages = [
@@ -251,6 +291,7 @@ Rules:
     const message = error instanceof Error ? error.message : 'Unexpected error.';
     appendMessage('system', message);
   } finally {
+    stopLoading();
     sendButton.disabled = false;
   }
 }
