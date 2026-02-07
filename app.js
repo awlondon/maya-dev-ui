@@ -6,10 +6,11 @@ const sendButton = document.getElementById('btn-send');
 const codeEditor = document.getElementById('code-editor');
 const consoleLog = document.getElementById('console-output-log');
 const consolePane = document.getElementById('consoleOutput');
-const previewFrame = document.getElementById('previewFrame');
+const previewFrameContainer = document.getElementById('previewFrameContainer');
 const statusLabel = document.getElementById('status-label');
 const generationIndicator = document.getElementById('generation-indicator');
 const previewStatus = document.getElementById('previewStatus');
+const previewExecutionStatus = document.getElementById('previewExecutionStatus');
 const splitter = document.getElementById('splitter');
 const rightPane = document.getElementById('right-pane');
 const codePanel = document.getElementById('code-panel');
@@ -36,6 +37,9 @@ let lastUserIntent = null;
 let loadingStartTime = null;
 let loadingInterval = null;
 let editorDirty = false;
+let previewIframe = null;
+let previewTimeoutId = null;
+let previewHeavyTimer = null;
 const CODE_INTENT_PATTERNS = [
   /build|create|make|generate/i,
   /show|visualize|diagram|chart|graph|ui|interface|layout/i,
@@ -125,14 +129,21 @@ function formatAssistantHtml(text) {
   return `${escapeHtml(mainText)} <span class="assistant-aside">${escapeHtml(asideText)}</span>`;
 }
 
-function setPreviewStatus(source) {
+function setPreviewStatus(message) {
   if (!previewStatus) {
     return;
   }
 
-  previewStatus.textContent = source === 'editor'
-    ? 'Preview updated from editor'
-    : 'Preview updated by assistant';
+  previewStatus.textContent = message;
+}
+
+function setPreviewExecutionStatus(state, message) {
+  if (!previewExecutionStatus) {
+    return;
+  }
+
+  previewExecutionStatus.textContent = message;
+  previewExecutionStatus.className = `preview-execution-status ${state}`;
 }
 
 function renderAssistantText(text, messageId) {
@@ -231,18 +242,6 @@ function detectCodeIntent(userInput, hasExistingCode) {
   };
 }
 
-function runGeneratedCode(code) {
-  if (!previewFrame) {
-    return;
-  }
-  outputPanel?.classList.add('loading');
-  setTimeout(() => {
-    renderToIframe(code);
-    setPreviewStatus('assistant');
-    outputPanel?.classList.remove('loading');
-  }, 150);
-}
-
 function runEditorCode() {
   console.log('🚀 runEditorCode fired');
   const html = codeEditor?.value ?? '';
@@ -253,23 +252,80 @@ function runEditorCode() {
     return;
   }
 
+  setPreviewExecutionStatus('running', 'Running');
   renderToIframe(html);
-  setPreviewStatus('editor');
+  setPreviewStatus('Preview updated from editor');
+}
+
+function injectFrameGuard(html) {
+  const guardScript = `<script>(function(){let __frameCount=0;const __maxFrames=300;const __raf=window.requestAnimationFrame.bind(window);window.requestAnimationFrame=function(fn){if(__frameCount++>__maxFrames){throw new Error('Frame limit exceeded');}return __raf(fn);};})();</script>`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (match) => `${match}\n${guardScript}`);
+  }
+  if (/<body[^>]*>/i.test(html)) {
+    return html.replace(/<body[^>]*>/i, (match) => `${match}\n${guardScript}`);
+  }
+  return `${guardScript}\n${html}`;
+}
+
+function resetPreviewTimers() {
+  if (previewTimeoutId) {
+    clearTimeout(previewTimeoutId);
+  }
+  if (previewHeavyTimer) {
+    clearTimeout(previewHeavyTimer);
+  }
+  previewTimeoutId = null;
+  previewHeavyTimer = null;
+}
+
+function createSandboxedIframe() {
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', 'allow-scripts');
+  iframe.setAttribute('aria-label', 'Live preview');
+  return iframe;
 }
 
 function renderToIframe(html) {
   console.log('🖼️ Rendering to iframe');
-  if (!previewFrame) {
+  if (!previewFrameContainer) {
     return;
   }
 
   const nonce = Date.now();
-  const wrappedHtml = `<!-- generation:${nonce} -->\n${html}`;
+  const guardedHtml = injectFrameGuard(html);
+  const wrappedHtml = `<!-- generation:${nonce} -->\n${guardedHtml}`;
 
-  previewFrame.srcdoc = '<!doctype html><html><body></body></html>';
-  requestAnimationFrame(() => {
-    previewFrame.srcdoc = wrappedHtml;
-  });
+  resetPreviewTimers();
+  previewFrameContainer.innerHTML = '';
+  previewIframe = createSandboxedIframe();
+  previewFrameContainer.appendChild(previewIframe);
+  outputPanel?.classList.add('loading');
+
+  previewTimeoutId = setTimeout(() => {
+    if (previewIframe) {
+      previewIframe.remove();
+      previewIframe = null;
+    }
+    if (previewHeavyTimer) {
+      clearTimeout(previewHeavyTimer);
+      previewHeavyTimer = null;
+    }
+    outputPanel?.classList.remove('loading');
+    setPreviewExecutionStatus('stopped', 'Stopped (timeout)');
+  }, 2000);
+
+  previewHeavyTimer = setTimeout(() => {
+    setPreviewExecutionStatus('heavy', 'Heavy load');
+  }, 1200);
+
+  previewIframe.onload = () => {
+    resetPreviewTimers();
+    outputPanel?.classList.remove('loading');
+    setPreviewExecutionStatus('running', 'Running');
+  };
+
+  previewIframe.srcdoc = wrappedHtml;
 }
 
 function updateGenerationIndicator() {
@@ -485,7 +541,8 @@ The user's message does not require interface changes. Respond with plain text o
       currentCode = nextCode;
       codeEditor.value = nextCode;
       editorDirty = false;
-      runGeneratedCode(nextCode);
+      setPreviewStatus('Code updated — click Run Code to execute');
+      setPreviewExecutionStatus('idle', 'Idle');
     }
     if (interfaceStatus) {
       if (codeChanged) {
@@ -615,5 +672,5 @@ if (fullscreenToggle && consolePane) {
 
 setStatusOnline(false);
 updateGenerationIndicator();
-setPreviewStatus('assistant');
-runGeneratedCode(currentCode);
+setPreviewStatus('Ready — click Run Code to execute');
+setPreviewExecutionStatus('idle', 'Idle');
