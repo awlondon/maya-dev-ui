@@ -770,14 +770,17 @@ When making interface changes, respond with plain text plus an optional \`\`\`ht
     const extractedText = extractChatText(reply);
     const chatText = extractedText || (extractedHtml ? '' : reply.trim());
 
+    let nextCode = extractedHtml;
+    const hasCode = Boolean(nextCode);
+
     if (chatText) {
       renderAssistantText(chatText, pendingMessageId);
     } else {
-      updateMessage(pendingMessageId, '<em>Generating interactive output…</em>');
+      updateMessage(pendingMessageId, '');
+      if (hasCode) {
+        setPreviewStatus('Running interactive scene…');
+      }
     }
-
-    let nextCode = extractedHtml;
-    const hasCode = Boolean(nextCode);
 
     if (hasCode && isOverlyLiteral(nextCode, extractedText)) {
       console.warn('⚠️ Literal UI detected — consider prompting expressive response');
