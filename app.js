@@ -22,10 +22,9 @@ const loadingIndicator = document.getElementById('loadingIndicator');
 const codeIntentBadge = document.getElementById('codeIntentBadge');
 const executionWarnings = document.getElementById('executionWarnings');
 const runButton = document.getElementById('runCode');
-const EXECUTION_TIMEOUT_MS = 5000;
+const SANDBOX_TIMEOUT_MS = 5000;
 const MAX_RAF = 600;
 const MAX_INTERVALS = 25;
-const MAX_TIMEOUTS = 50;
 const BACKEND_URL =
   "https://text-code.primarydesigncompany.workers.dev";
 
@@ -44,9 +43,8 @@ let loadingStartTime = null;
 let loadingInterval = null;
 let editorDirty = false;
 let lastUpdateSource = 'llm';
-let previewIframe = null;
-let previewTimeoutId = null;
-let previewKillSwitchId = null;
+let sandboxIframe = null;
+let sandboxKillTimer = null;
 let pendingExecution = null;
 let awaitingConfirmation = false;
 let sandboxListenerBound = false;
@@ -345,11 +343,64 @@ function runEditorCode() {
     return;
   }
   setPreviewExecutionStatus('running', '🟢 Running…');
-  renderToIframe(wrappedUserCode);
+  runInSandbox(wrappedUserCode);
+}
+
+function buildSafetyShim() {
+  return `
+<script>
+(() => {
+  // ----- HARD TIMEOUT -----
+  const killTimer = setTimeout(() => {
+    parent.postMessage({ type: "SANDBOX_TIMEOUT" }, "*");
+    throw new Error("Sandbox execution timeout");
+  }, ${SANDBOX_TIMEOUT_MS});
+
+  // ----- RAF CAP -----
+  let rafCount = 0;
+  const MAX_RAF = ${MAX_RAF};
+  const originalRAF = window.requestAnimationFrame;
+
+  window.requestAnimationFrame = function (cb) {
+    rafCount++;
+    if (rafCount > MAX_RAF) {
+      throw new Error("RAF limit exceeded");
+    }
+    return originalRAF(cb);
+  };
+
+  // ----- INTERVAL CAP -----
+  let intervalCount = 0;
+  const MAX_INTERVALS = ${MAX_INTERVALS};
+  const originalSetInterval = window.setInterval;
+
+  window.setInterval = function (fn, delay) {
+    intervalCount++;
+    if (intervalCount > MAX_INTERVALS) {
+      throw new Error("Too many intervals");
+    }
+    return originalSetInterval(fn, delay);
+  };
+
+  // ----- ERROR FORWARDING -----
+  window.addEventListener("error", (e) => {
+    parent.postMessage({
+      type: "SANDBOX_ERROR",
+      message: e.message
+    }, "*");
+  });
+
+  // ----- CLEAN EXIT -----
+  window.addEventListener("load", () => {
+    clearTimeout(killTimer);
+  });
+})();
+<\/script>
+`;
 }
 
 function injectSafetyLayer(html) {
-  const safetyScript = `<script>(function(){const EXECUTION_TIMEOUT_MS=${EXECUTION_TIMEOUT_MS};const MAX_RAF=${MAX_RAF};const MAX_INTERVALS=${MAX_INTERVALS};const MAX_TIMEOUTS=${MAX_TIMEOUTS};let rafCount=0;let intervalCount=0;let timeoutCount=0;let logCount=0;const post=(payload)=>{try{parent.postMessage(payload,'*');}catch(error){}};const killTimer=setTimeout(()=>{post({type:'SANDBOX_TIMEOUT'});throw new Error('Sandbox execution timeout');},EXECUTION_TIMEOUT_MS);const clearKill=()=>{clearTimeout(killTimer);};window.addEventListener('load',()=>{setTimeout(clearKill,0);});const originalRAF=window.requestAnimationFrame.bind(window);window.requestAnimationFrame=function(cb){rafCount++;if(rafCount>MAX_RAF){post({type:'SANDBOX_RAF_LIMIT'});throw new Error('RAF limit exceeded');}return originalRAF(cb);};const originalSetInterval=window.setInterval.bind(window);window.setInterval=function(fn,delay,...rest){intervalCount++;if(intervalCount>MAX_INTERVALS){post({type:'SANDBOX_INTERVAL_LIMIT'});throw new Error('Too many intervals');}return originalSetInterval(fn,delay,...rest);};const originalSetTimeout=window.setTimeout.bind(window);window.setTimeout=function(fn,delay,...rest){timeoutCount++;if(timeoutCount>MAX_TIMEOUTS){post({type:'SANDBOX_TIMEOUT_LIMIT'});throw new Error('Too many timeouts');}return originalSetTimeout(fn,delay,...rest);};const originalLog=console.log.bind(console);console.log=(...args)=>{logCount++;if(logCount>200){return;}if(args.length>1000){return;}originalLog(...args);};window.addEventListener('error',(event)=>{post({type:'SANDBOX_ERROR',message:event.message});});window.addEventListener('unhandledrejection',(event)=>{const message=event.reason?.message||String(event.reason);post({type:'SANDBOX_ERROR',message});});})();</script>`;
+  const safetyScript = buildSafetyShim();
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head[^>]*>/i, (match) => `${match}\n${safetyScript}`);
   }
@@ -359,17 +410,6 @@ function injectSafetyLayer(html) {
   return `${safetyScript}\n${html}`;
 }
 
-function resetPreviewTimers() {
-  if (previewTimeoutId) {
-    clearTimeout(previewTimeoutId);
-  }
-  previewTimeoutId = null;
-  if (previewKillSwitchId) {
-    clearTimeout(previewKillSwitchId);
-  }
-  previewKillSwitchId = null;
-}
-
 function createSandboxedIframe() {
   const iframe = document.createElement('iframe');
   iframe.setAttribute('sandbox', 'allow-scripts');
@@ -377,17 +417,22 @@ function createSandboxedIframe() {
   return iframe;
 }
 
-function destroyPreviewIframe() {
-  if (previewIframe) {
-    previewIframe.remove();
-    previewIframe = null;
+function destroySandbox() {
+  if (sandboxKillTimer) {
+    clearTimeout(sandboxKillTimer);
+    sandboxKillTimer = null;
   }
-  resetPreviewTimers();
+
+  if (sandboxIframe) {
+    sandboxIframe.remove();
+    sandboxIframe = null;
+  }
+
   outputPanel?.classList.remove('loading');
 }
 
 function handleSandboxMessage(event) {
-  if (!previewIframe || event.source !== previewIframe.contentWindow) {
+  if (!sandboxIframe || event.source !== sandboxIframe.contentWindow) {
     return;
   }
   const messageType = event?.data?.type;
@@ -395,30 +440,22 @@ function handleSandboxMessage(event) {
     return;
   }
 
-  if (messageType === 'SANDBOX_RAF_LIMIT') {
-    setPreviewExecutionStatus('capped', '🟡 Capped animation');
-    setPreviewStatus('Animation cap reached — sandbox stopped.');
-    appendOutput('RAF limit exceeded — sandbox stopped.', 'error');
-    destroyPreviewIframe();
-    return;
-  }
-
   if (messageType === 'SANDBOX_TIMEOUT') {
     setPreviewExecutionStatus('stopped', '🔴 Stopped (timeout)');
     setPreviewStatus('Execution timed out — sandbox stopped.');
     appendOutput('Sandbox execution timeout.', 'error');
-    destroyPreviewIframe();
+    destroySandbox();
     return;
   }
 
-  if (messageType.endsWith('_LIMIT') || messageType === 'SANDBOX_ERROR') {
+  if (messageType === 'SANDBOX_ERROR') {
     setPreviewExecutionStatus('stopped', '🔴 Stopped (error)');
     setPreviewStatus('Execution error — sandbox stopped.');
     const errorMessage = event?.data?.message
       ? `Sandbox error: ${event.data.message}`
       : 'Sandbox error.';
     appendOutput(errorMessage, 'error');
-    destroyPreviewIframe();
+    destroySandbox();
   }
 }
 
@@ -430,44 +467,39 @@ function ensureSandboxListener() {
   sandboxListenerBound = true;
 }
 
-function renderToIframe(html) {
+function showSandboxStatus(text) {
+  setPreviewStatus(text);
+}
+
+function runInSandbox(userHTML) {
   console.log('🖼️ Rendering to iframe');
   if (!previewFrameContainer) {
     return;
   }
 
   ensureSandboxListener();
-  const nonce = Date.now();
-  const guardedHtml = injectSafetyLayer(html);
-  const wrappedHtml = `<!-- generation:${nonce} -->\n${guardedHtml}`;
+  const guardedHtml = injectSafetyLayer(userHTML);
 
-  destroyPreviewIframe();
-  previewIframe = createSandboxedIframe();
-  previewFrameContainer.appendChild(previewIframe);
+  destroySandbox();
+  sandboxIframe = createSandboxedIframe();
+  previewFrameContainer.appendChild(sandboxIframe);
   outputPanel?.classList.add('loading');
 
   setPreviewExecutionStatus('running', '🟢 Running…');
   setPreviewStatus('Sandbox running…');
 
-  previewTimeoutId = setTimeout(() => {
+  sandboxKillTimer = setTimeout(() => {
+    destroySandbox();
     setPreviewExecutionStatus('stopped', '🔴 Stopped (timeout)');
-    setPreviewStatus('Execution timed out — sandbox stopped.');
-    appendOutput('Sandbox execution timeout.', 'error');
-    destroyPreviewIframe();
-  }, EXECUTION_TIMEOUT_MS);
-
-  previewKillSwitchId = setTimeout(() => {
-    setPreviewExecutionStatus('stopped', '🔴 Stopped (timeout)');
-    setPreviewStatus('Execution timed out — sandbox stopped.');
+    showSandboxStatus('⛔ Execution stopped (timeout)');
     appendOutput('Sandbox hard stop triggered.', 'error');
-    destroyPreviewIframe();
-  }, EXECUTION_TIMEOUT_MS + 500);
+  }, SANDBOX_TIMEOUT_MS + 500);
 
-  previewIframe.onload = () => {
+  sandboxIframe.onload = () => {
     outputPanel?.classList.remove('loading');
   };
 
-  previewIframe.srcdoc = wrappedHtml;
+  sandboxIframe.srcdoc = guardedHtml;
 }
 
 function updateGenerationIndicator() {
