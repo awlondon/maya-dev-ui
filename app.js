@@ -84,48 +84,45 @@ function resetSandboxFrame() {
   previewFrameHost.appendChild(nextFrame);
   sandboxFrame = nextFrame;
   sandbox.setIframe(nextFrame);
+  preview.attach(nextFrame);
   return nextFrame;
 }
 
-const preview = (() => {
-  let ready = false;
-  const readyListeners = new Set();
+const preview = {
+  ready: false,
+  listeners: new Set(),
+  attach(frame) {
+    this.ready = false;
+    this.listeners.clear();
 
-  function markReady() {
-    if (ready) {
-      return;
-    }
-    ready = true;
-    readyListeners.forEach((listener) => listener());
-    readyListeners.clear();
-  }
-
-  if (sandboxFrame) {
-    sandboxFrame.addEventListener('load', () => {
-      markReady();
+    frame.addEventListener('load', () => {
+      this.ready = true;
+      this.listeners.forEach((listener) => listener());
+      this.listeners.clear();
     });
 
-    if (sandboxFrame.contentDocument?.readyState === 'complete') {
-      markReady();
+    if (frame.contentDocument?.readyState === 'complete') {
+      this.ready = true;
     }
+  },
+  isReady() {
+    return this.ready;
+  },
+  once(eventName, listener) {
+    if (eventName !== 'ready') {
+      return;
+    }
+    if (this.ready) {
+      listener();
+      return;
+    }
+    this.listeners.add(listener);
   }
+};
 
-  return {
-    isReady() {
-      return ready;
-    },
-    once(eventName, listener) {
-      if (eventName !== 'ready') {
-        return;
-      }
-      if (ready) {
-        listener();
-        return;
-      }
-      readyListeners.add(listener);
-    }
-  };
-})();
+if (sandboxFrame) {
+  preview.attach(sandboxFrame);
+}
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
