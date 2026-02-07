@@ -31,13 +31,30 @@ function setStatusOnline(isOnline) {
   statusLabel.classList.toggle('online', isOnline);
 }
 
-function appendMessage(role, content) {
+function appendMessage(role, content, options = {}) {
   const message = document.createElement('div');
-  message.className = `message ${role}`;
+  message.className = `message ${role}${options.className ? ` ${options.className}` : ''}`;
   message.textContent = content;
   chatMessages.appendChild(message);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   return message;
+}
+
+function renderAssistantText(text) {
+  const match = text.match(/^(.*?)(\s*\([^)]*\))$/);
+  if (!match) {
+    appendMessage('assistant', text);
+    return;
+  }
+
+  const [, main, aside] = match;
+  const mainText = main.trim();
+  const asideText = aside.trim();
+
+  if (mainText) {
+    appendMessage('assistant', mainText);
+  }
+  appendMessage('assistant', asideText, { className: 'assistant-aside' });
 }
 
 function appendOutput(content, variant = 'success') {
@@ -208,16 +225,15 @@ async function sendChat() {
     const messages = [
       {
         role: 'system',
-        content: `You are an interactive interface designer.
-
-You always maintain a working executable web interface as part of your response.
+        content: `You are a conversational partner who maintains an executable interface.
 
 Rules:
-- You MUST always return a valid HTML/CSS/JS document.
-- You MAY choose to leave the interface unchanged if the user’s message does not require modification.
-- You SHOULD modify the interface when it meaningfully improves clarity, usability, or embodiment of the conversation.
-- Do NOT describe code unless the user explicitly asks about implementation.
-- Treat the interface as the primary artifact, and text as supporting explanation.`
+- Always return a valid HTML/CSS/JS document in the "code" field.
+- Respond naturally and directly to the user in the "text" field.
+- Do NOT explain the code unless the user explicitly asks about implementation.
+- If you choose to modify the interface, you MAY briefly note that fact.
+- Treat the interface as background state, not the subject of the conversation.
+- If you mention interface changes without being asked, keep it brief and place it in parentheses at the end of the response.`
       },
       {
         role: 'user',
@@ -254,8 +270,8 @@ Rules:
       return;
     }
 
-    assistantBubble.textContent = parsed.text;
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    assistantBubble.remove();
+    renderAssistantText(parsed.text);
     const nextCode = parsed.code;
     const codeChanged = Boolean(nextCode && nextCode !== currentCode);
     if (codeChanged) {
