@@ -450,10 +450,74 @@ function createGenerationNarrator({
   };
 }
 
-function startGenerationNarration() {
+function createProgressDots({ addMessage, updateMessage }) {
+  let messageId = null;
+  let dots = 0;
+  let timerId = null;
+
+  function render() {
+    dots = (dots + 1) % 4;
+    const text = `Thinking${'.'.repeat(dots)}`;
+    updateMessage(messageId, `<em>${text}</em>`);
+  }
+
+  return {
+    start() {
+      messageId = addMessage(
+        'assistant',
+        '<em>Thinking</em>',
+        { className: 'thinking', pending: true }
+      );
+      timerId = setInterval(render, 500);
+    },
+    stop() {
+      if (timerId) {
+        clearInterval(timerId);
+      }
+      if (messageId) {
+        const messageEl = document.querySelector(`[data-id="${messageId}"]`);
+        if (messageEl) {
+          messageEl.remove();
+        }
+      }
+    }
+  };
+}
+
+function createGenerationFeedback({ addMessage, updateMessage }) {
+  const dots = createProgressDots({ addMessage, updateMessage });
   const narrator = createGenerationNarrator({ addMessage });
-  narrator.start();
-  return () => narrator.stop();
+
+  let dotsTimer = null;
+  let narratorTimer = null;
+  let stopped = false;
+
+  return {
+    start() {
+      stopped = false;
+      dotsTimer = setTimeout(() => {
+        if (stopped) {
+          return;
+        }
+        dots.start();
+      }, 2500);
+
+      narratorTimer = setTimeout(() => {
+        if (stopped) {
+          return;
+        }
+        dots.stop();
+        narrator.start();
+      }, 6000);
+    },
+    stop() {
+      stopped = true;
+      clearTimeout(dotsTimer);
+      clearTimeout(narratorTimer);
+      dots.stop();
+      narrator.stop();
+    }
+  };
 }
 
 function renderAssistantMessage(messageId, text, metadata) {
@@ -1145,10 +1209,11 @@ async function sendChat() {
   );
   currentTurnMessageId = pendingMessageId;
   chatFinalized = false;
-  const stopNarration = startGenerationNarration();
 
   setStatusOnline(false);
   startLoading();
+  const generationFeedback = createGenerationFeedback({ addMessage, updateMessage });
+  generationFeedback.start();
 
   let generationMetadata = '';
   let rawReply = '';
@@ -1192,9 +1257,9 @@ Output rules:
 
     setStatusOnline(true);
     rawReply = data?.choices?.[0]?.message?.content || 'No response.';
-    stopNarration();
+    generationFeedback.stop();
   } catch (error) {
-    stopNarration();
+    generationFeedback.stop();
     finalizeChatOnce(() => {
       renderAssistantMessage(pendingMessageId, '⚠️ Something went wrong while generating the response.', formatGenerationMetadata(performance.now() - startedAt));
     });

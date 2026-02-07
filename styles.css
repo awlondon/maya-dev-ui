@@ -563,18 +563,9 @@ button:disabled {
 }
 
 .message.assistant.thinking {
-  opacity: 0.55;
+  opacity: 0.45;
   font-style: italic;
-  animation: fadeIn 0.25s ease-out;
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 0.55;
-  }
+  transition: opacity 0.2s ease;
 }
 
 .message .assistant-meta {
