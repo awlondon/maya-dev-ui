@@ -11,6 +11,7 @@ const githubToken = process.env.GITHUB_TOKEN || '';
 const githubRepo = process.env.GITHUB_REPO || 'awlondon/maya-dev-ui';
 const githubLogPath = process.env.GITHUB_USAGE_LOG_PATH || 'data/usage_log.csv';
 const githubLogBranch = process.env.GITHUB_USAGE_LOG_BRANCH || '';
+const githubApiBase = process.env.GITHUB_API_BASE || '';
 
 const OUTPUT_ESTIMATE_MULTIPLIER = {
   code: 2.5,
@@ -152,13 +153,14 @@ app.post('/api/chat', async (req, res) => {
         status: 'error'
       };
       if (githubToken) {
-        void appendUsageLog({
-          entry,
-          githubToken,
-          repo: githubRepo,
-          path: githubLogPath,
-          branch: githubLogBranch || undefined
-        }).catch((error) => {
+        const githubEnv = {
+          GITHUB_TOKEN: githubToken,
+          GITHUB_REPO: githubRepo,
+          GITHUB_BRANCH: githubLogBranch || 'main',
+          GITHUB_USAGE_LOG_PATH: githubLogPath,
+          ...(githubApiBase ? { GITHUB_API_BASE: githubApiBase } : {})
+        };
+        void appendUsageLog(githubEnv, entry).catch((error) => {
           console.error('Usage log append failed:', error);
         });
       }
@@ -198,13 +200,14 @@ app.post('/api/chat', async (req, res) => {
     };
 
     if (githubToken) {
-      void appendUsageLog({
-        entry,
-        githubToken,
-        repo: githubRepo,
-        path: githubLogPath,
-        branch: githubLogBranch || undefined
-      }).catch((error) => {
+      const githubEnv = {
+        GITHUB_TOKEN: githubToken,
+        GITHUB_REPO: githubRepo,
+        GITHUB_BRANCH: githubLogBranch || 'main',
+        GITHUB_USAGE_LOG_PATH: githubLogPath,
+        ...(githubApiBase ? { GITHUB_API_BASE: githubApiBase } : {})
+      };
+      void appendUsageLog(githubEnv, entry).catch((error) => {
         console.error('Usage log append failed:', error);
       });
     }
