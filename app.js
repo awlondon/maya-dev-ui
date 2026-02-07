@@ -22,8 +22,8 @@ const executionWarnings = document.getElementById('executionWarnings');
 const runButton = document.getElementById('runCode');
 const rollbackButton = document.getElementById('rollbackButton');
 const promoteButton = document.getElementById('promoteButton');
-const SANDBOX_TIMEOUT_MS = 5000;
-const MAX_RAF = 600;
+const SANDBOX_TIMEOUT_MS = 4500;
+const MAX_RAF = 300;
 const BACKEND_URL =
   "https://text-code.primarydesigncompany.workers.dev";
 
@@ -621,6 +621,33 @@ When intent implies movement, animation, simulation, random patterns, or competi
 - Alternative: setInterval stepping when smoothness is not critical.
 - Optional: start/stop hooks for user-controlled runs.
 Treat sandbox limits as expected; stop cleanly without errors.
+
+SANDBOX ANIMATION CONTRACT (AUTO-INJECTED, REQUIRED):
+- Every animation/simulation must be finite by default with explicit INIT → RUN → YIELD → STOP phases.
+- Hard caps: const SANDBOX_TIME_LIMIT_MS = 4500; const SANDBOX_FRAME_LIMIT = 300; let frameCount = 0; const startTime = performance.now();
+- Cooperative guard:
+  function shouldStop() {
+    return (
+      frameCount >= SANDBOX_FRAME_LIMIT ||
+      performance.now() - startTime >= SANDBOX_TIME_LIMIT_MS
+    );
+  }
+- Loop must exit cleanly when shouldStop() is true; no unbounded RAF, while(true), recursion, or setInterval without a stop.
+- Auto-inject this scaffold when animation intent is detected (do not explain unless asked):
+  const SANDBOX = {
+    maxFrames: 300,
+    maxTimeMs: 4500,
+    frame: 0,
+    start: performance.now(),
+    shouldStop() {
+      return (
+        this.frame >= this.maxFrames ||
+        performance.now() - this.start >= this.maxTimeMs
+      );
+    }
+  };
+  // inside loop: SANDBOX.frame++;
+- If user asks for reset/run again/game/simulation/continuous, expose window.resetSimulation and window.startSimulation while honoring caps.
 
 If you generate code, include it in a single \`\`\`html code block.
 Do not include JSON, metadata, or explanations inside the code block.
