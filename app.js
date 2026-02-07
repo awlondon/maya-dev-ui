@@ -4,6 +4,7 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
+const creditPreviewEl = document.getElementById('credit-preview');
 const micButton = document.getElementById('btn-mic');
 const codeEditor = document.getElementById('code-editor');
 const lineNumbersEl = document.getElementById('line-numbers');
@@ -80,6 +81,11 @@ const defaultInterfaceCode = `<!doctype html>
 </body>
 </html>`;
 
+const TOKENS_PER_CREDIT = 250;
+const CREDIT_BAND_MIN = 0.7;
+const CREDIT_BAND_MAX = 1.3;
+const CREDIT_WARNING_THRESHOLD = 0.5;
+
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -115,6 +121,150 @@ function updateLineNumbers() {
   lineNumbersEl.textContent = numbers;
   lineCountEl.textContent = `Lines: ${lines}`;
 }
+
+function getCreditState() {
+  const root = document.getElementById('root');
+  const remainingCredits = Number.parseInt(root?.dataset.remainingCredits ?? '', 10);
+  const freeTierRemaining = Number.parseInt(root?.dataset.freeTierRemaining ?? '', 10);
+  const planLabel = root?.dataset.planLabel?.trim() || '';
+  return {
+    remainingCredits: Number.isFinite(remainingCredits) ? remainingCredits : null,
+    freeTierRemaining: Number.isFinite(freeTierRemaining) ? freeTierRemaining : null,
+    planLabel: planLabel || null,
+    isFreeTier: planLabel.toLowerCase() === 'free'
+  };
+}
+
+function estimateTokensFromText(text) {
+  if (!text) {
+    return 0;
+  }
+  return Math.ceil(text.length / 4);
+}
+
+function estimateTokensFromCode(code) {
+  if (!code) {
+    return 0;
+  }
+  return Math.ceil(code.length / 3);
+}
+
+function estimateTotalTokens({ userInput, currentCode, intentType }) {
+  const inputTokens = estimateTokensFromText(userInput) + estimateTokensFromCode(currentCode);
+  const outputMultiplier = intentType === 'code' ? 2.5 : 1.2;
+  const estimatedOutputTokens = Math.ceil(inputTokens * outputMultiplier);
+
+  return {
+    inputTokens,
+    outputTokens: estimatedOutputTokens,
+    totalTokens: inputTokens + estimatedOutputTokens
+  };
+}
+
+function tokensToCredits(tokenCount) {
+  return Math.ceil(tokenCount / TOKENS_PER_CREDIT);
+}
+
+function estimateCreditRange(tokenEstimate) {
+  const baseCredits = tokensToCredits(tokenEstimate);
+  return {
+    min: Math.max(1, Math.floor(baseCredits * CREDIT_BAND_MIN)),
+    max: Math.ceil(baseCredits * CREDIT_BAND_MAX)
+  };
+}
+
+function estimateCreditsPreview({ userInput, currentCode, intentType }) {
+  const { totalTokens } = estimateTotalTokens({
+    userInput,
+    currentCode,
+    intentType
+  });
+
+  return estimateCreditRange(totalTokens);
+}
+
+function formatCreditPreview({ min, max, intentType, creditState }) {
+  const intentLabel = intentType === 'code' ? 'visual generation' : 'chat';
+  let text = `≈ ${min}–${max} credits · ${intentLabel}`;
+
+  if (creditState.isFreeTier && creditState.freeTierRemaining !== null) {
+    text += ` · free tier (${creditState.freeTierRemaining} left today)`;
+  }
+
+  return text;
+}
+
+function formatCreditWarning({ min, max, remainingCredits }) {
+  if (!remainingCredits || remainingCredits <= 0) {
+    return null;
+  }
+  const minFraction = Math.round((min / remainingCredits) * 100);
+  const maxFraction = Math.round((max / remainingCredits) * 100);
+  return `⚠️ ~${minFraction}–${maxFraction}% of remaining credits`;
+}
+
+function updateCreditPreview({ force = false } = {}) {
+  if (!creditPreviewEl || !chatInput) {
+    return;
+  }
+
+  const userText = chatInput.value.trim();
+  if (!userText) {
+    creditPreviewEl.textContent = '';
+    creditPreviewEl.classList.remove('warning');
+    return;
+  }
+
+  if (chatState?.locked && !force) {
+    return;
+  }
+
+  const resolvedIntent = resolveIntent(userText);
+  const creditState = getCreditState();
+  const { min, max } = estimateCreditsPreview({
+    userInput: userText,
+    currentCode,
+    intentType: resolvedIntent.type
+  });
+
+  let previewText = formatCreditPreview({
+    min,
+    max,
+    intentType: resolvedIntent.type,
+    creditState
+  });
+
+  const warning = creditState.remainingCredits
+    ? formatCreditWarning({
+        min,
+        max,
+        remainingCredits: creditState.remainingCredits
+      })
+    : null;
+
+  if (warning && max / creditState.remainingCredits >= CREDIT_WARNING_THRESHOLD) {
+    creditPreviewEl.classList.add('warning');
+    previewText += ` · ${warning}`;
+  } else {
+    creditPreviewEl.classList.remove('warning');
+  }
+
+  creditPreviewEl.textContent = previewText;
+}
+
+function debounce(fn, delayMs) {
+  let timerId;
+  return (...args) => {
+    if (timerId) {
+      clearTimeout(timerId);
+    }
+    timerId = setTimeout(() => {
+      fn(...args);
+    }, delayMs);
+  };
+}
+
+const requestCreditPreviewUpdate = debounce(() => updateCreditPreview(), 250);
 
 codeEditor.value = defaultInterfaceCode;
 let currentCode = defaultInterfaceCode;
@@ -1297,6 +1447,7 @@ async function sendChat() {
 
   lockChat();
   chatInput.value = '';
+  updateCreditPreview({ force: true });
   appendMessage('user', userInput);
 
   const pendingMessageId = addMessage(
@@ -1427,6 +1578,12 @@ chatForm.addEventListener('submit', (event) => {
   sendChat();
 });
 
+if (chatInput) {
+  chatInput.addEventListener('input', () => {
+    requestCreditPreviewUpdate();
+  });
+}
+
 codeEditor.addEventListener('input', () => {
   const hasEdits = codeEditor.value !== baselineCode;
   userHasEditedCode = hasEdits;
@@ -1441,6 +1598,7 @@ codeEditor.addEventListener('input', () => {
   }
   resetExecutionPreparation();
   updateLineNumbers();
+  requestCreditPreviewUpdate();
 });
 
 codeEditor.addEventListener('scroll', () => {
