@@ -4,6 +4,7 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
+const micButton = document.getElementById('btn-mic');
 const codeEditor = document.getElementById('code-editor');
 const lineNumbersEl = document.getElementById('line-numbers');
 const lineCountEl = document.getElementById('line-count');
@@ -206,7 +207,107 @@ const tts = (() => {
   return { speak, stop };
 })();
 
+const stt = (() => {
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SpeechRecognition) {
+    return null;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  let listening = false;
+  let onFinalText = null;
+  let onStateChange = null;
+
+  recognition.onstart = () => {
+    listening = true;
+    onStateChange?.(true);
+  };
+
+  recognition.onend = () => {
+    listening = false;
+    onStateChange?.(false);
+  };
+
+  recognition.onerror = (event) => {
+    console.warn('STT error:', event.error);
+    listening = false;
+    onStateChange?.(false);
+  };
+
+  recognition.onresult = (event) => {
+    let interim = '';
+    let finalText = '';
+
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalText += transcript;
+      } else {
+        interim += transcript;
+      }
+    }
+
+    if (finalText && onFinalText) {
+      onFinalText(finalText.trim());
+    } else if (interim && onFinalText) {
+      onFinalText(interim.trim(), { interim: true });
+    }
+  };
+
+  function start() {
+    if (!listening) {
+      recognition.start();
+    }
+  }
+
+  function stop() {
+    if (listening) {
+      recognition.stop();
+    }
+  }
+
+  function bind({ onText, onListeningChange }) {
+    onFinalText = onText;
+    onStateChange = onListeningChange;
+  }
+
+  return { start, stop, bind };
+})();
+
 updateLineNumbers();
+
+if (stt && micButton && chatInput) {
+  stt.bind({
+    onText: (text, opts = {}) => {
+      if (opts.interim) {
+        chatInput.value = text;
+        return;
+      }
+
+      chatInput.value = text;
+    },
+    onListeningChange: (isListening) => {
+      micButton.classList.toggle('listening', isListening);
+      micButton.textContent = isListening ? '🛑' : '🎙️';
+    }
+  });
+
+  micButton.addEventListener('click', () => {
+    if (micButton.classList.contains('listening')) {
+      stt.stop();
+    } else {
+      stt.start();
+    }
+  });
+} else if (micButton) {
+  micButton.style.display = 'none';
+}
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
