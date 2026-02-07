@@ -20,6 +20,12 @@
         <div class="panel-header">Chat</div>
         <div id="chat-messages" class="panel-body"></div>
         <form id="chat-form" class="panel-footer">
+          <div id="loadingIndicator" class="loading hidden">
+            <span class="dot">•</span>
+            <span class="dot">•</span>
+            <span class="dot">•</span>
+            <span class="timer">0.0s</span>
+          </div>
           <textarea id="chat-input" placeholder="Ask the model something..."></textarea>
           <button id="btn-send" type="submit">Send Chat</button>
         </form>
@@ -30,6 +36,9 @@
           <div class="panel-header">Code Editor</div>
           <textarea id="code-editor" spellcheck="false"></textarea>
           <div class="panel-footer actions">
+            <button id="runCode" type="button">Run Code</button>
+            <button id="rollbackButton" type="button">Roll back to last generated</button>
+            <button id="promoteButton" type="button">Promote to baseline</button>
             <div id="generation-indicator" class="generation-indicator">
               ✨ Creating new UI
             </div>
@@ -44,12 +53,36 @@
               Console Output
               <span class="panel-header-label">Live Preview</span>
             </div>
-            <button id="fullscreenToggle" class="ghost-button" type="button">⤢ Fullscreen</button>
+            <div class="panel-header-actions">
+              <div id="interfaceStatus" class="interface-status unchanged">
+                Interface unchanged
+              </div>
+              <div id="previewExecutionStatus" class="preview-execution-status idle">
+                Idle
+              </div>
+              <div id="executionWarnings" class="execution-warnings hidden" aria-live="polite"></div>
+              <div id="previewStatus" class="preview-status">
+                Preview updated by assistant
+              </div>
+              <button id="viewDiffBtn" class="ghost-button" type="button" style="display:none;">
+                View changes
+              </button>
+              <button id="fullscreenToggle" class="ghost-button" type="button">⤢ Fullscreen</button>
+            </div>
           </div>
           <div class="panel-body">
             <div id="console-output-log" class="console-output-log"></div>
             <div id="consoleOutput" class="console-output">
-              <iframe id="previewFrame" sandbox="allow-scripts allow-same-origin"></iframe>
+              <div id="sandbox-status" style="font-size:12px; opacity:0.7; font-family:monospace;">idle</div>
+              <div id="sandbox-controls" class="sandbox-controls hidden" aria-label="Sandbox controls">
+                <button id="sandboxPause" class="ghost-button" type="button">Pause</button>
+                <button id="sandboxResume" class="ghost-button hidden" type="button">Resume</button>
+                <button id="sandboxReset" class="ghost-button" type="button">Reset</button>
+                <button id="sandboxStop" class="ghost-button" type="button">Stop</button>
+              </div>
+              <div id="previewFrameContainer" class="preview-frame-container">
+                <iframe id="sandbox" sandbox="allow-scripts"></iframe>
+              </div>
             </div>
           </div>
         </section>
@@ -57,6 +90,6 @@
     </main>
   </div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
