@@ -334,51 +334,20 @@ function detectCodeIntent(userInput, hasExistingCode) {
 }
 
 function runEditorCode() {
-  console.log('🚀 runEditorCode fired');
-  const html = codeEditor?.value ?? '';
-  console.log('HTML length:', html.length);
-
-  if (!html || html.trim().length < 10) {
-    console.warn('⚠️ No runnable code in editor');
-    setPreviewStatus('No runnable code found');
-    setPreviewExecutionStatus('stopped', 'Stopped');
+  if (!previewFrameContainer) {
     return;
   }
 
-  if (!awaitingConfirmation) {
-    setPreviewExecutionStatus('preparing', 'Preparing execution');
-    setPreviewStatus('Preparing execution…');
-    const analysis = analyzeCodeForExecution(html, DEBUG_INTENT);
-    pendingExecution = analysis;
-    setExecutionWarnings(analysis.warnings);
+  const wrappedUserCode = codeEditor?.value ?? '';
+  previewFrameContainer.innerHTML = '';
 
-    if (!analysis.allowed) {
-      setPreviewExecutionStatus('stopped', 'Stopped (blocked)');
-      setPreviewStatus('Execution blocked due to unsafe loop');
-      if (runButton) {
-        runButton.textContent = 'Run Code';
-        runButton.disabled = true;
-      }
-      return;
-    }
+  const iframe = document.createElement('iframe');
+  iframe.sandbox = 'allow-scripts';
+  iframe.style.width = '100%';
+  iframe.style.height = '100%';
+  iframe.srcdoc = wrappedUserCode;
 
-    awaitingConfirmation = true;
-    if (runButton) {
-      runButton.textContent = 'Run (Safe)';
-    }
-    setPreviewExecutionStatus('ready', 'Ready');
-    setPreviewStatus('Ready to run with limits');
-    return;
-  }
-
-  const analysis = pendingExecution || analyzeCodeForExecution(html, DEBUG_INTENT);
-  awaitingConfirmation = false;
-  if (runButton) {
-    runButton.textContent = 'Run Code';
-  }
-  setPreviewExecutionStatus('running', 'Running (sandboxed)');
-  renderToIframe(html, analysis);
-  setPreviewStatus('Executing in sandbox');
+  previewFrameContainer.appendChild(iframe);
 }
 
 function injectFrameGuard(html, limits) {
