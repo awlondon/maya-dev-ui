@@ -26,14 +26,11 @@
       </div>
       <div class="top-bar-actions">
         <span id="status-label">Offline</span>
-        <button id="credit-badge" class="credit-badge" type="button" aria-haspopup="dialog" aria-expanded="false">
-          <span class="credit-badge-icon" aria-hidden="true">🟢</span>
-          <span class="credit-badge-text">
-            <span class="credit-badge-count">312</span>
-            <span class="credit-badge-label">credits</span>
-          </span>
+        <div id="creditBadge" class="credit-badge" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false">
+          <span class="icon" aria-hidden="true"></span>
+          <span class="count"></span>
           <span class="credit-badge-tooltip">Credits power generations. Resets monthly.</span>
-        </button>
+        </div>
         <div class="avatar-chip" aria-label="User profile">JD</div>
       </div>
     </header>
@@ -42,8 +39,10 @@
       <div class="credit-panel-header">Credits</div>
       <button class="ghost-button credit-panel-cta" type="button" data-open-usage>View usage</button>
       <div class="credit-meter">
-        <div class="credit-meter-fill"></div>
-        <span class="credit-meter-label">0 / 0</span>
+        <div class="bar">
+          <div class="fill"></div>
+        </div>
+        <div class="label">0 / 0</div>
       </div>
       <div class="credit-panel-meta">
         <div id="credit-reset">Resets in 12 days</div>
@@ -63,6 +62,7 @@
           <form id="chat-form" class="panel-footer">
             <div id="credit-banner" class="credit-banner hidden"></div>
             <div id="credit-inline-warning" class="credit-inline-warning hidden"></div>
+            <div id="throttleNotice" class="throttle hidden"></div>
             <div id="credit-zero" class="credit-zero hidden">
               <span>Out of credits — upgrade or wait for reset.</span>
               <div class="credit-cta">
