@@ -1,4 +1,3 @@
-const DEBUG_INTENT = true; // flip to false to silence intent logs
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
@@ -19,7 +18,6 @@ const fullscreenToggle = document.getElementById('fullscreenToggle');
 const interfaceStatus = document.getElementById('interfaceStatus');
 const viewDiffBtn = document.getElementById('viewDiffBtn');
 const loadingIndicator = document.getElementById('loadingIndicator');
-const codeIntentBadge = document.getElementById('codeIntentBadge');
 const executionWarnings = document.getElementById('executionWarnings');
 const runButton = document.getElementById('runCode');
 const SANDBOX_TIMEOUT_MS = 5000;
@@ -37,46 +35,19 @@ const defaultInterfaceCode = `<!doctype html>
 codeEditor.value = defaultInterfaceCode;
 let currentCode = defaultInterfaceCode;
 let previousCode = null;
-let lastUserIntent = null;
 let loadingStartTime = null;
 let loadingInterval = null;
-let editorDirty = false;
-let lastUpdateSource = 'llm';
+let userHasEditedCode = false;
 let activeIframe = null;
 let sandboxKillTimer = null;
 let sandboxStartTime = null;
 let sandboxFrameCount = 0;
 let sandboxStatusTimer = null;
 let rafMonitorId = null;
-const CODE_INTENT_PATTERNS = [
-  /build|create|make|generate/i,
-  /show|visualize|diagram|chart|graph|ui|interface|layout/i,
-  /button|slider|input|click|drag|hover/i,
-  /html|css|js|javascript|code|component/i,
-  /add|remove|change|modify|update|refactor/i
-];
-
-function getHasExistingCode() {
-  const code = codeEditor?.value ?? '';
-  const trimmed = code.trim();
-  return Boolean(trimmed && trimmed.includes('<html'));
-}
 
 function setStatusOnline(isOnline) {
   statusLabel.textContent = isOnline ? 'API online' : 'Offline';
   statusLabel.classList.toggle('online', isOnline);
-}
-
-function updateCodeIntentBadge(codeIntent) {
-  if (!codeIntentBadge) {
-    return;
-  }
-
-  if (DEBUG_INTENT && codeIntent) {
-    codeIntentBadge.classList.remove('hidden');
-  } else {
-    codeIntentBadge.classList.add('hidden');
-  }
 }
 
 function addMessage(role, html, options = {}) {
@@ -221,7 +192,7 @@ function buildWrappedPrompt(userInput, currentCode) {
   return `Current code:\n${currentCode}\n\nUser: ${userInput}`;
 }
 
-function analyzeCodeForExecution(code, debugIntent = false) {
+function analyzeCodeForExecution(code) {
   const flags = {
     hasRAF: code.includes('requestAnimationFrame'),
     hasWhileTrue: /while\s*\(\s*true\s*\)/.test(code),
@@ -258,15 +229,6 @@ function analyzeCodeForExecution(code, debugIntent = false) {
     allowed = false;
   }
 
-  if (debugIntent) {
-    console.groupCollapsed('🧪 Execution analysis');
-    console.log('Profile:', executionProfile);
-    console.log('Allowed:', allowed);
-    console.log('Flags:', flags);
-    console.log('Warnings:', warnings);
-    console.groupEnd();
-  }
-
   return {
     allowed,
     executionProfile,
@@ -284,59 +246,15 @@ function resetExecutionPreparation({ clearWarnings = true } = {}) {
   }
 }
 
-function detectCodeIntent(userInput, hasExistingCode) {
-  const text = userInput.trim().toLowerCase();
-
-  if (/^(explain|tell me about|what is|who is)/i.test(text)) {
-    return {
-      intent: false,
-      source: 'explicit-text',
-      match: text
-    };
-  }
-
-  if (/^\/ui\b|^\/code\b/i.test(text)) {
-    return {
-      intent: true,
-      source: 'explicit',
-      match: '/ui or /code prefix'
-    };
-  }
-
-  if (hasExistingCode) {
-    return {
-      intent: true,
-      source: 'artifact-default',
-      match: 'existing artifact'
-    };
-  }
-
-  for (const rx of CODE_INTENT_PATTERNS) {
-    if (rx.test(text)) {
-      return {
-        intent: true,
-        source: 'heuristic',
-        match: rx.toString()
-      };
-    }
-  }
-
-  return {
-    intent: false,
-    source: 'none',
-    match: null
-  };
-}
-
 function updateExecutionWarningsFor(code) {
-  const analysis = analyzeCodeForExecution(code, DEBUG_INTENT);
+  const analysis = analyzeCodeForExecution(code);
   setExecutionWarnings(analysis.warnings);
   if (!analysis.allowed) {
     appendOutput('Execution warning: blocking loop detected.', 'error');
   }
 }
 
-function setStatus(state) {
+function setStatus(state, source = null) {
   if (state === 'COMPILING') {
     setPreviewExecutionStatus('compiling', 'Compiling…');
     setPreviewStatus('Compiling…');
@@ -348,8 +266,9 @@ function setStatus(state) {
     return;
   }
   if (state === 'RUNNING') {
-    setPreviewExecutionStatus('running', '🟢 Running…');
-    setPreviewStatus('Sandbox running…');
+    const label = source ? `RUNNING · ${source}` : 'RUNNING';
+    setPreviewExecutionStatus('running', label);
+    setPreviewStatus(`Running ${source ?? 'code'}…`);
   }
 }
 
@@ -452,7 +371,7 @@ function runSandbox(iframe) {
   console.log('MAYA: inline execution only');
 }
 
-function handleLLMOutput(code) {
+function handleLLMOutput(code, source = 'generated') {
   setStatus('COMPILING');
 
   updateExecutionWarningsFor(code);
@@ -461,6 +380,7 @@ function handleLLMOutput(code) {
     return;
   }
 
+  stopSandbox();
   clearSandbox();
 
   const iframe = injectIntoSandbox(code);
@@ -474,7 +394,7 @@ function handleLLMOutput(code) {
 
     requestAnimationFrame(() => {
       runSandbox(activeIframe);
-      setStatus('RUNNING');
+      setStatus('RUNNING', source);
     });
   });
 }
@@ -492,15 +412,27 @@ function updateGenerationIndicator() {
 
 function markPreviewStale() {
   setPreviewStatus('✏️ Code modified — click Run Code to apply');
-  setPreviewExecutionStatus('stale', 'Stale');
+  setPreviewExecutionStatus('stale', 'MODIFIED · not running');
 }
 
-function applyLLMCode(code) {
-  lastUpdateSource = 'llm';
+function updateRunButtonVisibility() {
+  if (!runButton) {
+    return;
+  }
+  runButton.style.display = userHasEditedCode ? 'inline-flex' : 'none';
+}
+
+function setCodeFromLLM(code) {
   codeEditor.value = code;
-  editorDirty = false;
+  userHasEditedCode = false;
+  updateRunButtonVisibility();
   setPreviewStatus('Preview updated by assistant');
-  handleLLMOutput(code);
+  handleLLMOutput(code, 'generated');
+}
+
+function handleUserRun(code) {
+  setPreviewStatus('Applying your edits…');
+  handleLLMOutput(code, 'user');
 }
 
 function simpleLineDiff(oldCode, newCode) {
@@ -561,18 +493,6 @@ async function sendChat() {
 
   chatInput.value = '';
   appendMessage('user', userInput);
-  const hasExistingCode = getHasExistingCode();
-  const intentInfo = detectCodeIntent(userInput, hasExistingCode);
-  const codeIntent = intentInfo.intent;
-  if (DEBUG_INTENT) {
-    console.groupCollapsed('🧠 Code Intent Decision');
-    console.log('User input:', userInput);
-    console.log('Code intent:', intentInfo.intent);
-    console.log('Source:', intentInfo.source);
-    console.log('Matched:', intentInfo.match);
-    console.groupEnd();
-  }
-  updateCodeIntentBadge(codeIntent);
 
   const pendingMessageId = addMessage(
     'assistant',
@@ -629,14 +549,9 @@ If you are unsure how to respond:
 If you generate code, include it in a single \`\`\`html code block.
 Do not include JSON, metadata, or explanations inside the code block.
 Do not output JSON wrappers or transport metadata.`;
-    const systemMessage = codeIntent
-      ? `${systemBase}
+    const systemMessage = `${systemBase}
 
-When making interface changes, respond with plain text plus an optional \`\`\`html code block for the full HTML.`
-      : `${systemBase}
-
-Additional instruction:
-The user's message does not require interface changes. Respond with plain text only unless absolutely necessary.`;
+When making interface changes, respond with plain text plus an optional \`\`\`html code block for the full HTML.`;
 
     const messages = [
       {
@@ -677,33 +592,23 @@ The user's message does not require interface changes. Respond with plain text o
       updateMessage(pendingMessageId, '');
     }
 
-    let nextCode = codeIntent ? extractedHtml : null;
+    let nextCode = extractedHtml;
     const hasCode = Boolean(nextCode);
 
     if (hasCode && isOverlyLiteral(nextCode, extractedText)) {
       console.warn('⚠️ Literal UI detected — consider prompting expressive response');
     }
 
-    if (
-      hasCode
-      && intentInfo.source === 'artifact-default'
-      && nextCode.trim().length < 50
-    ) {
-      console.warn('⚠️ Refusing to render trivial HTML');
-      extractedHtml = null;
-      nextCode = null;
-    }
-
     stopLoading();
     let codeChanged = Boolean(nextCode && nextCode !== currentCode);
-    if (codeChanged && editorDirty) {
+    if (codeChanged && userHasEditedCode) {
       console.warn('⚠️ Editor modified by user; not overwriting code');
       codeChanged = false;
     }
     if (codeChanged) {
       previousCode = currentCode;
       currentCode = nextCode;
-      applyLLMCode(nextCode);
+      setCodeFromLLM(nextCode);
       resetExecutionPreparation({ clearWarnings: false });
     }
     if (interfaceStatus) {
@@ -727,7 +632,6 @@ The user's message does not require interface changes. Respond with plain text o
         viewDiffBtn.onclick = null;
       }
     }
-    lastUserIntent = prompt;
     updateGenerationIndicator();
   } catch (error) {
     updateMessage(
@@ -746,8 +650,8 @@ chatForm.addEventListener('submit', (event) => {
 });
 
 codeEditor.addEventListener('input', () => {
-  editorDirty = true;
-  lastUpdateSource = 'user';
+  userHasEditedCode = true;
+  updateRunButtonVisibility();
   markPreviewStale();
   resetExecutionPreparation();
 });
@@ -757,29 +661,28 @@ document.addEventListener('DOMContentLoaded', () => {
     console.warn('⚠️ Run Code button not found');
     return;
   }
+  updateRunButtonVisibility();
   console.log('✅ Run Code listener attached');
   runButton.addEventListener('click', () => {
     console.log('🟢 Run Code clicked');
-    if (editorDirty) {
-      editorDirty = false;
-      setPreviewStatus('Applying your edits…');
-      handleLLMOutput(codeEditor.value);
+    if (!userHasEditedCode) {
       return;
     }
-    handleLLMOutput(codeEditor.value);
+    handleUserRun(codeEditor.value);
+    userHasEditedCode = false;
+    updateRunButtonVisibility();
   });
 });
 
 codeEditor.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault();
-    if (editorDirty) {
-      editorDirty = false;
-      setPreviewStatus('Applying your edits…');
-      handleLLMOutput(codeEditor.value);
+    if (!userHasEditedCode) {
       return;
     }
-    handleLLMOutput(codeEditor.value);
+    handleUserRun(codeEditor.value);
+    userHasEditedCode = false;
+    updateRunButtonVisibility();
   }
 });
 
