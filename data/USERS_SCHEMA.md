@@ -7,30 +7,25 @@ Canonical file: `data/users.csv`.
 | Field | Type | Description |
 | --- | --- | --- |
 | user_id | string (uuid) | Primary key. Never changes. |
-| created_at | ISO 8601 | Account creation timestamp. |
-| email | string | Normalized lowercase email. |
+| email | string | Normalized lowercase email. Used for identity merging. |
+| email_verified | boolean | Whether the email is verified. |
 | auth_provider | enum | `google`, `apple`, `email`. |
+| provider_user_id | string | OAuth subject/Apple user identifier (nullable for email). |
 | display_name | string | Optional (Google/Apple name or user-provided). |
+| created_at | ISO 8601 | Account creation timestamp. |
+| last_login_at | ISO 8601 | Last successful login. |
+| plan_tier | enum | `free`, `starter`, `pro`, `enterprise`. |
+| credits_total | int | Total credits granted for the current period. |
+| credits_remaining | int | Remaining credits for the current period. |
+| monthly_reset_at | ISO 8601 | Next monthly reset timestamp. |
 | newsletter_opt_in | boolean | Always true by default. |
-| account_status | enum | `active`, `suspended`, `deleted`. |
-| plan | enum | `free`, `starter`, `pro`, `enterprise`. |
-| monthly_credit_limit | int | Credits per month. |
-| monthly_credits_used | int | Reset monthly. |
-| hard_daily_limit | int | Absolute daily cap. |
-| soft_daily_limit | int | Warning threshold. |
-| last_request_at | ISO 8601 | For abuse detection. |
-| last_reset_at | ISO 8601 | Monthly reset marker. |
-| total_requests | int | Lifetime count. |
-| total_tokens_estimated | int | Approximate cost tracking. |
-| notes | string | Internal only. |
+| account_status | enum | `active`, `suspended`. |
 
-## Credits defaults
+## Notes
 
-| Plan | Monthly credits | Soft daily | Hard daily |
-| --- | --- | --- | --- |
-| free | 100 | 10 | 20 |
-| starter | 500 | 50 | 80 |
-| pro | 2,000 | 200 | 300 |
+- `provider_user_id` should store Google `sub` or Apple user identifier permanently.
+- Apple may return email only on the first login; fall back to `provider_user_id` for matching.
+- Email remains the primary identity merge key when present.
 
 ## Update strategy
 
