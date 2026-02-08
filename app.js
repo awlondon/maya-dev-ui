@@ -152,8 +152,7 @@ const defaultInterfaceCode = `<!doctype html>
 </html>`;
 
 const TOKENS_PER_CREDIT = 250;
-const CREDIT_BAND_MIN = 0.7;
-const CREDIT_BAND_MAX = 1.3;
+const CREDIT_RESERVE_MULTIPLIER = 1.25;
 const CREDIT_WARNING_THRESHOLD = 0.5;
 const MONTHLY_SOFT_USAGE_THRESHOLD = 0.5;
 const MONTHLY_FIRM_USAGE_THRESHOLD = 0.85;
@@ -1038,8 +1037,8 @@ function showPaywall({ reason, estimate, remaining, modeOverride } = {}) {
 
   if (paywallCostLine) {
     const costTextNode = paywallCostLine.firstChild;
-    const estimateText = estimate?.min && estimate?.max
-      ? `Estimated cost: ${formatCreditNumber(estimate.min)}–${formatCreditNumber(estimate.max)} credits.`
+    const estimateText = estimate?.estimated && estimate?.reserved
+      ? `Estimated cost: ~${formatCreditNumber(estimate.estimated)} credits (reserving ${formatCreditNumber(estimate.reserved)}).`
       : '';
     if (costTextNode && costTextNode.nodeType === Node.TEXT_NODE) {
       if (isPreventive && estimateText) {
@@ -1829,52 +1828,32 @@ function closeUsageModal() {
   document.body.style.overflow = '';
 }
 
-function estimateTokensFromText(text) {
-  if (!text) {
+function estimateTokensForRequest({ userInput, currentCode }) {
+  const chars = (userInput?.length || 0) + (currentCode?.length || 0);
+  if (chars <= 0) {
     return 0;
   }
-  return Math.ceil(text.length / 4);
-}
-
-function estimateTokensFromCode(code) {
-  if (!code) {
-    return 0;
-  }
-  return Math.ceil(code.length / 3);
-}
-
-function estimateTotalTokens({ userInput, currentCode, intentType }) {
-  const inputTokens = estimateTokensFromText(userInput) + estimateTokensFromCode(currentCode);
-  const outputMultiplier = intentType === 'code' ? 2.5 : 1.2;
-  const estimatedOutputTokens = Math.ceil(inputTokens * outputMultiplier);
-
-  return {
-    inputTokens,
-    outputTokens: estimatedOutputTokens,
-    totalTokens: inputTokens + estimatedOutputTokens
-  };
+  return Math.ceil(chars / 4);
 }
 
 function tokensToCredits(tokenCount) {
+  if (!Number.isFinite(tokenCount) || tokenCount <= 0) {
+    return 0;
+  }
   return Math.ceil(tokenCount / TOKENS_PER_CREDIT);
 }
 
-function estimateCreditRange(tokenEstimate) {
-  const baseCredits = tokensToCredits(tokenEstimate);
+function estimateCreditsPreview({ userInput, currentCode }) {
+  const totalTokens = estimateTokensForRequest({ userInput, currentCode });
+  const estimatedCredits = tokensToCredits(totalTokens);
+  const reservedCredits = estimatedCredits
+    ? Math.ceil(estimatedCredits * CREDIT_RESERVE_MULTIPLIER)
+    : 0;
+
   return {
-    min: Math.max(1, Math.floor(baseCredits * CREDIT_BAND_MIN)),
-    max: Math.ceil(baseCredits * CREDIT_BAND_MAX)
+    estimated: estimatedCredits,
+    reserved: reservedCredits
   };
-}
-
-function estimateCreditsPreview({ userInput, currentCode, intentType }) {
-  const { totalTokens } = estimateTotalTokens({
-    userInput,
-    currentCode,
-    intentType
-  });
-
-  return estimateCreditRange(totalTokens);
 }
 
 function getEstimatedNextCost() {
@@ -1885,18 +1864,16 @@ function getEstimatedNextCost() {
   if (!userText) {
     return 0;
   }
-  const resolvedIntent = resolveIntent(userText);
-  const { max } = estimateCreditsPreview({
+  const { reserved } = estimateCreditsPreview({
     userInput: userText,
-    currentCode,
-    intentType: resolvedIntent.type
+    currentCode
   });
-  return max;
+  return reserved;
 }
 
-function formatCreditPreview({ min, max, intentType, creditState }) {
+function formatCreditPreview({ estimated, reserved, intentType, creditState }) {
   const intentLabel = intentType === 'code' ? 'visual generation' : 'chat';
-  let text = `≈ ${min}–${max} credits · ${intentLabel}`;
+  let text = `Estimated: ~${estimated} credits · Reserving ${reserved} · ${intentLabel}`;
 
   if (creditState.isFreeTier && creditState.freeTierRemaining !== null) {
     text += ` · free tier (${creditState.freeTierRemaining} left today)`;
@@ -1905,13 +1882,12 @@ function formatCreditPreview({ min, max, intentType, creditState }) {
   return text;
 }
 
-function formatCreditWarning({ min, max, remainingCredits }) {
+function formatCreditWarning({ reserved, remainingCredits }) {
   if (!remainingCredits || remainingCredits <= 0) {
     return null;
   }
-  const minFraction = Math.round((min / remainingCredits) * 100);
-  const maxFraction = Math.round((max / remainingCredits) * 100);
-  return `⚠️ ~${minFraction}–${maxFraction}% of remaining credits`;
+  const reserveFraction = Math.round((reserved / remainingCredits) * 100);
+  return `⚠️ ~${reserveFraction}% of remaining credits`;
 }
 
 function updateCreditPreview({ force = false } = {}) {
@@ -1932,28 +1908,26 @@ function updateCreditPreview({ force = false } = {}) {
 
   const resolvedIntent = resolveIntent(userText);
   const creditState = getCreditState();
-  const { min, max } = estimateCreditsPreview({
+  const { estimated, reserved } = estimateCreditsPreview({
     userInput: userText,
-    currentCode,
-    intentType: resolvedIntent.type
+    currentCode
   });
 
   let previewText = formatCreditPreview({
-    min,
-    max,
+    estimated,
+    reserved,
     intentType: resolvedIntent.type,
     creditState
   });
 
   const warning = creditState.remainingCredits
     ? formatCreditWarning({
-        min,
-        max,
+        reserved,
         remainingCredits: creditState.remainingCredits
       })
     : null;
 
-  if (warning && max / creditState.remainingCredits >= CREDIT_WARNING_THRESHOLD) {
+  if (warning && reserved / creditState.remainingCredits >= CREDIT_WARNING_THRESHOLD) {
     creditPreviewEl.classList.add('warning');
     previewText += ` · ${warning}`;
   } else {
@@ -3126,17 +3100,37 @@ function formatGenerationMetadata(durationMs) {
 }
 
 function formatUsageMetadata(usage, context, throttle) {
-  if (!usage || !Number.isFinite(usage.creditsCharged)) {
+  if (!usage) {
     return { usageText: '', warningText: '' };
   }
+  const creditsCharged = Number(usage.creditsCharged ?? usage.credits_charged);
+  const actualCredits = Number(usage.actualCredits ?? usage.actual_credits ?? creditsCharged);
+  if (!Number.isFinite(actualCredits)) {
+    return { usageText: '', warningText: '' };
+  }
+  const reservedCredits = Number(usage.reservedCredits ?? usage.reserved_credits);
+  const refundedCredits = Number(usage.refundedCredits ?? usage.refunded_credits);
   const creditsRemaining = Number.isFinite(usage.remainingCredits)
     ? usage.remainingCredits
     : Number.isFinite(context?.remainingCredits)
       ? context.remainingCredits
       : null;
-  const usageText = creditsRemaining !== null
-    ? `— Used ${usage.creditsCharged} credits · ${creditsRemaining} remaining`
-    : `— Used ${usage.creditsCharged} credits`;
+
+  const metadataParts = [`— Used ${actualCredits} credits`];
+  if (Number.isFinite(reservedCredits)) {
+    metadataParts.push(`Reserved ${reservedCredits}`);
+  }
+  if (Number.isFinite(refundedCredits) && refundedCredits > 0) {
+    metadataParts.push(`Refunded +${refundedCredits}`);
+  }
+  if (Number.isFinite(creditsRemaining)) {
+    metadataParts.push(`${creditsRemaining} remaining`);
+  }
+  if (Number.isFinite(creditsCharged) && creditsCharged !== actualCredits) {
+    metadataParts.push(`Charged ${creditsCharged}`);
+  }
+
+  const usageText = metadataParts.join(' · ');
 
   let warningText = '';
   if (throttle?.state === 'warning' || throttle?.state === 'blocked') {
@@ -3155,7 +3149,12 @@ function applyUsageToCredits(usage) {
     return;
   }
   const remainingCredits = Number(usage.remainingCredits ?? usage.credits_remaining);
-  const creditsCharged = Number(usage.creditsCharged ?? usage.credits_charged);
+  const creditsCharged = Number(
+    usage.creditsCharged
+    ?? usage.credits_charged
+    ?? usage.actualCredits
+    ?? usage.actual_credits
+  );
   if (!Number.isFinite(remainingCredits)) {
     return;
   }
@@ -3579,11 +3578,9 @@ async function sendChat() {
       (creditState.dailyLimit ?? 0) - (creditState.todayCreditsUsed ?? 0)
     );
     if (estimatedNextCost > remainingToday) {
-      const resolvedIntent = resolveIntent(userInput);
       const estimate = estimateCreditsPreview({
         userInput,
-        currentCode,
-        intentType: resolvedIntent.type
+        currentCode
       });
       showPaywall({
         reason: throttle.reason,
@@ -3622,12 +3619,8 @@ async function sendChat() {
   updateCreditPreview({ force: true });
   appendMessage('user', userInput);
 
-  const tokenEstimate = estimateTotalTokens({
-    userInput,
-    currentCode,
-    intentType: resolvedIntent.type
-  });
-  recordLargeGeneration(getUserContext().id, tokenEstimate.totalTokens);
+  const tokenEstimate = estimateTokensForRequest({ userInput, currentCode });
+  recordLargeGeneration(getUserContext().id, tokenEstimate);
 
   const pendingMessageId = addMessage(
     'assistant',
