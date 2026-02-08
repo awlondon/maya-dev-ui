@@ -1,8 +1,15 @@
 import { createSignedToken, verifySignedToken } from './token';
+import { jsonError } from './errors';
+import { requireEnv } from './env';
 
 const SESSION_COOKIE_NAME = 'maya_session';
 
 export async function issueSession(user: any, env: Env, request?: Request) {
+  const missing = requireEnv(env, ['SESSION_SECRET']);
+  if (missing.length) {
+    return jsonError(`Missing env: ${missing.join(', ')}`, 500);
+  }
+
   const token = await createSignedToken(
     {
       sub: user.id,
@@ -30,8 +37,15 @@ export async function issueSession(user: any, env: Env, request?: Request) {
             'Secure'
           ];
 
-          if (env.COOKIE_DOMAIN) {
-            cookieParts.push(`Domain=${env.COOKIE_DOMAIN}`);
+          const host = request ? new URL(request.url).hostname : '';
+          const isPagesDev = host.endsWith('.pages.dev');
+          const cookieDomain = env.COOKIE_DOMAIN?.trim();
+
+          if (!isPagesDev && cookieDomain) {
+            cookieParts.push(`Domain=${cookieDomain}`);
+            cookieParts.push('SameSite=None');
+          } else if (!isPagesDev && host.endsWith('.primarydesignco.com')) {
+            cookieParts.push('Domain=.primarydesignco.com');
             cookieParts.push('SameSite=None');
           } else {
             cookieParts.push('SameSite=Lax');
@@ -59,6 +73,11 @@ function getCookieValue(cookieHeader: string | null, name: string) {
 }
 
 export async function getSessionFromRequest(request: Request, env: Env) {
+  const missing = requireEnv(env, ['SESSION_SECRET']);
+  if (missing.length) {
+    return jsonError(`Missing env: ${missing.join(', ')}`, 500);
+  }
+
   const token = getCookieValue(request.headers.get('Cookie'), SESSION_COOKIE_NAME);
   if (!token) {
     return null;

@@ -137,6 +137,8 @@ const isAuthDebugEnabled =
 
 let lastAuthProvider = '—';
 let lastMagicLink = '—';
+let lastGoogleAuthStatus = '—';
+let lastGoogleAuthJson = '—';
 
 export function markAuthAttempt(provider) {
   lastAuthProvider = provider;
@@ -219,6 +221,29 @@ async function refreshAuthDebug() {
   }
 
   try {
+    const envInfo = await fetchDebugInfo(`${API_BASE}/api/debug/env?ts=${Date.now()}`);
+    document.getElementById('authDebugEnvStatus').textContent =
+      `${envInfo.res.status}`;
+    if (envInfo.res.status === 404) {
+      document.getElementById('authDebugEnvMissing').textContent =
+        'debug endpoint disabled';
+    } else if (envInfo.contentType.includes('application/json')) {
+      const data = envInfo.json;
+      const envPresent = data?.env_present || {};
+      const missing = Object.entries(envPresent)
+        .filter(([, present]) => !present)
+        .map(([key]) => key);
+      document.getElementById('authDebugEnvMissing').textContent =
+        missing.length ? missing.join(', ') : 'none';
+    } else {
+      document.getElementById('authDebugEnvMissing').textContent = envInfo.preview;
+    }
+  } catch {
+    document.getElementById('authDebugEnvStatus').textContent = 'network error';
+    document.getElementById('authDebugEnvMissing').textContent = '—';
+  }
+
+  try {
     const healthInfo = await fetchDebugInfo(`${API_BASE}/api/health`);
     document.getElementById('authDebugHealthStatus').textContent =
       `${healthInfo.res.status}`;
@@ -238,6 +263,11 @@ async function refreshAuthDebug() {
 
   document.getElementById('authDebugLastProvider').textContent =
     lastAuthProvider;
+
+  document.getElementById('authDebugGoogleStatus').textContent =
+    lastGoogleAuthStatus;
+  document.getElementById('authDebugGoogleJson').textContent =
+    lastGoogleAuthJson;
 
   setDebugMagicLink(lastMagicLink);
 }
@@ -674,8 +704,13 @@ async function handleGoogleCredential(response) {
   });
 
   const data = await res.json().catch(() => ({}));
+  lastGoogleAuthStatus = `${res.status}`;
+  lastGoogleAuthJson = data && typeof data === 'object'
+    ? JSON.stringify(data)
+    : String(data ?? '—');
   if (!res.ok) {
     console.warn('Google auth failed.', data);
+    refreshAuthDebug();
     return;
   }
 
