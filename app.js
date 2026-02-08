@@ -499,7 +499,7 @@ function onAuthSuccess({ user, token, provider, credits }) {
 }
 
 async function handleGoogleCredential(response) {
-  const res = await fetch('/auth/google', {
+  const res = await fetch(`${BACKEND_URL}/auth/google`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -508,13 +508,20 @@ async function handleGoogleCredential(response) {
     body: JSON.stringify({ id_token: response.credential })
   });
 
-  const data = await res.json();
-  onAuthSuccess({
-    user: data.user,
-    token: data.token,
-    provider: 'google',
-    credits: data.credits
-  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.warn('Google auth failed.', data);
+    return;
+  }
+  const sessionLoaded = await bootstrapSessionFromServer();
+  if (!sessionLoaded) {
+    onAuthSuccess({
+      user: data.user,
+      token: data.token,
+      provider: 'google',
+      credits: data.credits
+    });
+  }
 }
 
 AuthController.register('google', () => {
@@ -930,7 +937,7 @@ function renderUI() {
 
 async function bootstrapSessionFromServer() {
   try {
-    const res = await fetch('/me', { credentials: 'include' });
+    const res = await fetch(`${BACKEND_URL}/me`, { credentials: 'include' });
     if (res.ok) {
       const data = await res.json();
       onAuthSuccess({
