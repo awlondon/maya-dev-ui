@@ -1,6 +1,7 @@
 import { issueSession } from '../session';
 import { jsonError } from '../errors';
 import { createSignedToken, verifySignedToken } from '../token';
+import { requireEnv } from '../env';
 
 let lastDevMagicLink: string | null = null;
 
@@ -20,6 +21,14 @@ export async function requestEmailLink(request: Request, env: Env) {
 
   if (!email) {
     return jsonError('Email required', 400);
+  }
+
+  const missing = [
+    ...requireEnv(env, ['EMAIL_TOKEN_SECRET']),
+    ...(env.ENVIRONMENT === 'dev' ? [] : requireEnv(env, ['RESEND_API_KEY']))
+  ];
+  if (missing.length) {
+    return jsonError(`Missing env: ${missing.join(', ')}`, 500);
   }
 
   // Short-lived, single-purpose token
@@ -62,6 +71,11 @@ export async function verifyEmailToken(request: Request, env: Env) {
 
   if (!token) {
     return jsonError('Missing token', 400);
+  }
+
+  const missing = requireEnv(env, ['EMAIL_TOKEN_SECRET', 'SESSION_SECRET']);
+  if (missing.length) {
+    return jsonError(`Missing env: ${missing.join(', ')}`, 500);
   }
 
   const payload = await verifySignedToken(token, env.EMAIL_TOKEN_SECRET);
