@@ -268,3 +268,127 @@ App loads instantly.
 Analytics hidden until clicked.
 
 Credits visible immediately.
+
+## 8. Troubleshooting (what “does nothing” really means)
+
+### A. Google / Apple buttons do nothing
+
+This almost always means the UI is rendered but not wired to auth.
+
+First check if a click handler exists:
+
+```js
+getEventListeners(document.querySelector('.google-btn'));
+```
+
+If you get `{}`, it is a dead button. Fix by attaching handlers:
+
+```js
+googleBtn.addEventListener('click', () => startGoogleAuth());
+appleBtn.addEventListener('click', () => startAppleAuth());
+```
+
+If the button lives inside a form, ensure it does not submit the form:
+
+```html
+<button type="button">Continue with Google</button>
+```
+
+### B. OAuth redirect URL mismatch (silent failure)
+
+If handlers exist but nothing happens (no popup, no network request), you
+almost certainly have a redirect URI mismatch.
+
+Google Console must whitelist:
+- https://dev.primarydesignco.com/auth/google/callback
+
+Apple Developer must configure:
+- Service ID
+- Return URL
+- Domain verification file
+
+Apple fails silently when any of these are wrong.
+
+### C. SDK never initialized
+
+Common mistake: initialization runs before the script loads or before the
+auth UI is mounted.
+
+Fix pattern:
+
+```js
+window.onload = () => initAuthProviders();
+```
+
+## 9. Email magic link issues
+
+### A. Confirm the frontend actually hits the backend
+
+Add a server-side log and verify it fires:
+
+```js
+console.log('MAGIC LINK SEND ATTEMPT', email);
+```
+
+If you do not see it, the frontend never called the endpoint.
+
+### B. Common email failures (most cases)
+
+- No SMTP provider configured (SendGrid/Postmark/SES/Resend)
+- From domain not verified (Gmail drops it)
+- Magic link uses localhost (works locally, fails for users)
+
+### C. Minimum viable setup (Resend example)
+
+```js
+import { Resend } from 'resend';
+
+const resend = new Resend(RESEND_API_KEY);
+
+await resend.emails.send({
+  from: 'Maya <auth@primarydesignco.com>',
+  to: email,
+  subject: 'Sign in to Maya',
+  html: `<a href="${magicLink}">Sign in</a>`
+});
+```
+
+Make sure:
+- primarydesignco.com DNS verified
+- SPF + DKIM set
+
+## 10. Why this happened
+
+Right now the system has:
+- UI for auth
+- But no auth orchestration layer
+
+Auth is not just buttons. The full chain is:
+
+UI → Provider SDK → Redirect → Callback → Session → UI unlock
+
+Only the UI and part of the form submission are currently present.
+
+## 11. Recommended next steps (order matters)
+
+1. **Add visible failures today**
+   - Add toasts on all auth attempts:
+
+     ```js
+     .catch(err => showError(err.message || 'Authentication failed'));
+     ```
+
+2. **Temporarily hide Apple + Google**
+   - Dead buttons destroy trust.
+
+3. **Get email auth working end-to-end**
+   - Once email works, you can test users, credits, and upgrades.
+
+4. **Centralize auth in one module**
+   - One file:
+     - `auth.start(provider)`
+     - `auth.callback()`
+     - `auth.signOut()`
+     - `auth.getSession()`
+
+No auth logic should live inside modals.
