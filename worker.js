@@ -10,7 +10,7 @@ const ANALYTICS_CACHE_TTL_SECONDS = 60 * 10;
 const DEFAULT_ANALYTICS_DAYS = 14;
 const MAX_ANALYTICS_DAYS = 365;
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
-const SESSION_COOKIE_NAME = 'session';
+const SESSION_COOKIE_NAME = 'maya_session';
 const REQUIRED_USER_HEADERS = [
   'user_id',
   'email',
@@ -519,7 +519,7 @@ async function issueSession(user, env) {
       status: 200,
       headers: {
         'content-type': 'application/json',
-        'set-cookie': `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${SESSION_MAX_AGE_SECONDS}`
+        'set-cookie': `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${SESSION_MAX_AGE_SECONDS}${env.SESSION_COOKIE_DOMAIN ? `; Domain=${env.SESSION_COOKIE_DOMAIN}` : ''}`
       }
     }
   );

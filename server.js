@@ -26,7 +26,7 @@ const DAILY_LIMITS = {
   pro: 2000,
   power: 10000
 };
-const SESSION_COOKIE_NAME = 'session';
+const SESSION_COOKIE_NAME = 'maya_session';
 
 function normalizeNumber(value) {
   const numeric = Number(value);
