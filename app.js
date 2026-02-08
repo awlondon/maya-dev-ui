@@ -25,6 +25,95 @@ const AuthController = (() => {
 
 window.AuthController = AuthController;
 
+const EmailAuthSlot = (() => {
+  let state = 'idle';
+  let email = '';
+
+  function render() {
+    const slot = document.querySelector('.auth-slot[data-provider="email"]');
+    if (!slot) {
+      return;
+    }
+
+    if (state === 'idle') {
+      slot.innerHTML = `
+        <div class="email-auth">
+          <input
+            type="email"
+            class="email-input"
+            placeholder="you@example.com"
+            aria-label="Email address"
+          />
+          <button class="auth-btn email-btn">Continue with Email</button>
+        </div>
+      `;
+    }
+
+    if (state === 'sending') {
+      slot.innerHTML = `
+        <button class="auth-btn" disabled>
+          Sending link…
+        </button>
+      `;
+    }
+
+    if (state === 'sent') {
+      slot.innerHTML = `
+        <div class="email-sent">
+          <p>Check your email</p>
+          <span>${email}</span>
+        </div>
+      `;
+    }
+
+    bind();
+  }
+
+  function bind() {
+    if (state !== 'idle') {
+      return;
+    }
+
+    const input = document.querySelector('.email-input');
+    const button = document.querySelector('.email-btn');
+
+    if (!input || !button) {
+      return;
+    }
+
+    button.onclick = async () => {
+      email = input.value.trim();
+      if (!email) {
+        return;
+      }
+
+      state = 'sending';
+      render();
+
+      try {
+        await fetch(`${BACKEND_URL}/auth/email/request`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+
+        state = 'sent';
+        render();
+      } catch {
+        state = 'idle';
+        render();
+      }
+    };
+  }
+
+  return {
+    init() {
+      state = 'idle';
+      render();
+    }
+  };
+})();
+
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
@@ -314,33 +403,41 @@ function clearAuthFromRoot() {
 
 function renderAuthModalHTML() {
   return `
-    <h2 class="auth-title">Welcome to Maya</h2>
+    <div class="auth-card">
+      <h2 class="auth-title">Welcome to Maya</h2>
 
-    <div class="auth-stack">
+      <div class="auth-stack">
 
-      <div class="auth-slot" data-provider="google">
-        <div id="google-signin"></div>
+        <div class="auth-slot" data-provider="google">
+          <div id="google-signin"></div>
+        </div>
+
+        <div class="auth-slot" data-provider="apple">
+          <button class="auth-btn">Continue with Apple</button>
+        </div>
+
+        <div class="auth-slot" data-provider="email"></div>
+
       </div>
 
-      <div class="auth-slot" data-provider="apple">
-        <button class="auth-btn">Continue with Apple</button>
-      </div>
-
-      <div class="auth-slot" data-provider="email">
-        <button class="auth-btn">Sign up with Email</button>
-      </div>
-
+      <label class="newsletter">
+        <input type="checkbox" checked />
+        Receive product updates and announcements
+      </label>
     </div>
-
-    <label class="newsletter">
-      <input type="checkbox" checked />
-      Receive product updates and announcements
-    </label>
   `;
 }
 
-function showAuthModal({ onClose } = {}) {
-  ModalManager.open(renderAuthModalHTML(), { onClose });
+function showAuthModal() {
+  const modalRoot = document.getElementById('modal-root');
+  if (!modalRoot) {
+    return;
+  }
+
+  modalRoot.innerHTML = renderAuthModalHTML();
+  modalRoot.classList.remove('hidden');
+  modalRoot.setAttribute('aria-hidden', 'false');
+
   AuthController.initAll();
 }
 
@@ -450,7 +547,7 @@ AuthController.register('google', () => {
 });
 
 AuthController.register('email', () => {
-  // no-op for now
+  EmailAuthSlot.init();
 });
 
 let appleAuthInitAttempts = 0;
@@ -503,14 +600,6 @@ function initAppleAuth() {
 }
 
 AuthController.register('apple', initAppleAuth);
-
-function renderEmailModal() {
-  return `
-    <h3>Sign in with Email</h3>
-    <input id="emailInput" type="email" placeholder="you@example.com" />
-    <button id="sendLink">Send magic link</button>
-  `;
-}
 
 const NUDGE_COPY = {
   monthly_soft: {
@@ -732,37 +821,8 @@ function resetAppToUnauthed() {
   uiState = UI_STATE.AUTH;
   closeAllModals();
   root?.classList.add('hidden');
-  showAuthModal({
-    onClose: () => {
-      if (!Auth.token) {
-        resetAppToUnauthed();
-      }
-    }
-  });
-  const modalRoot = document.getElementById('modal-root');
-  const emailButton = modalRoot?.querySelector('.auth-slot[data-provider="email"] .auth-btn');
-  if (emailButton) {
-    emailButton.onclick = () => {
-      ModalManager.open(renderEmailModal());
-    };
-  }
+  showAuthModal();
 }
-
-document.addEventListener('click', async (event) => {
-  if (event.target?.id !== 'sendLink') {
-    return;
-  }
-  const email = document.getElementById('emailInput')?.value?.trim();
-  if (!email) {
-    return;
-  }
-  await fetch('/auth/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email })
-  });
-  ModalManager.open('<p>Check your inbox.</p>');
-});
 
 async function signOut() {
   console.log('🔒 Signing out user');
