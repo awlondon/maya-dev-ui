@@ -1,6 +1,6 @@
-export async function onRequest(): Promise<Response> {
+export async function onRequest() {
   return new Response(
-    JSON.stringify({ ok: true, from: 'pages-function' }),
+    JSON.stringify({ ok: true, source: 'cloudflare-pages-function' }),
     { headers: { 'Content-Type': 'application/json' } }
   );
 }
