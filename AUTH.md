@@ -441,3 +441,34 @@ Only the UI and part of the form submission are currently present.
      - `auth.getSession()`
 
 No auth logic should live inside modals.
+
+## 12. Auth regression guardrails
+
+### A. API smoke tests (session + /me)
+
+- `tests/auth.google.smoke.test.ts` verifies that `/auth/google` issues a session cookie and `/me` returns the authenticated user.
+- `tests/auth.cors.test.ts` verifies credentialed CORS headers on `/me`.
+
+These tests are designed to run in CI against dev/staging with:
+
+```bash
+TEST_GOOGLE_ID_TOKEN=... npm test
+```
+
+### B. UI rehydration smoke test
+
+`tests/ui.auth.rehydrate.spec.ts` uses Playwright to inject a valid session cookie and assert the app renders authenticated.
+
+```bash
+TEST_SESSION_COOKIE=... npm run test:ui
+```
+
+### C. CI guardrail (pre-deploy)
+
+```bash
+curl -I https://api.dev.primarydesignco.com/me \\
+  -H \"Origin: https://dev.primarydesignco.com\" \\
+  | grep -q \"Access-Control-Allow-Credentials: true\"
+```
+
+Fail the deploy if this check fails.
