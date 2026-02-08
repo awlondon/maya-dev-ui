@@ -145,6 +145,10 @@ async function refreshAuthDebug() {
     const res = await fetch(`${BACKEND_URL}/me`, { credentials: 'include' });
     document.getElementById('authDebugMeStatus').textContent =
       `${res.status}`;
+    const authState = uiState === UI_STATE.APP ? 'authenticated' : 'unauthenticated';
+    if (isAuthDebugEnabled && authState === 'authenticated' && res.status !== 200) {
+      console.error('[AUTH INVARIANT FAILED] authenticated but /me != 200');
+    }
 
     if (res.ok) {
       const data = await res.json();
