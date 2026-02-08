@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Interactive LLM chat and code playground.",
   "type": "module",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "node --test --import tsx api/tests/auth.*.test.ts",
