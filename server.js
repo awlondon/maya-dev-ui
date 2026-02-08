@@ -5,6 +5,39 @@ import { calculateCreditsUsed } from './api/credits.js';
 import { appendUsageLog, readUsageLog } from './api/usageLog.js';
 
 const app = express();
+
+/**
+ * CORS — MUST BE FIRST MIDDLEWARE
+ */
+const ALLOWED_ORIGINS = [
+  'https://maya-dev-ui.pages.dev',
+  'https://dev.primarydesignco.com'
+];
+
+app.use(cors({
+  origin(origin, callback) {
+    // Allow server-to-server, curl, health checks
+    if (!origin) return callback(null, true);
+
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.error('❌ Blocked CORS origin:', origin);
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+/**
+ * REQUIRED for Google auth + POST requests
+ */
+app.options('*', cors());
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 const port = process.env.PORT || 3000;
 const apiUrl = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
 const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
@@ -28,32 +61,6 @@ const DAILY_LIMITS = {
   power: 10000
 };
 const SESSION_COOKIE_NAME = 'maya_session';
-const ALLOWED_ORIGINS = [
-  'https://dev.primarydesignco.com',
-  'https://maya-dev-ui.pages.dev'
-];
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
-    if (ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-    callback(new Error(`CORS blocked origin: ${origin}`));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
 app.use(express.static('.'));
 
 function normalizeNumber(value) {
