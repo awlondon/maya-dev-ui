@@ -69,6 +69,9 @@ const lineNumbersEl = document.getElementById('line-numbers');
 const lineCountEl = document.getElementById('line-count');
 const consoleLog = document.getElementById('console-output-log');
 const consolePane = document.getElementById('consoleOutput');
+const root = document.getElementById('root');
+const authGate = document.getElementById('auth-gate');
+const authButtons = document.querySelectorAll('[data-auth-provider]');
 let sandboxFrame = document.getElementById('sandbox');
 const previewFrameHost = document.getElementById('previewFrameContainer');
 const statusLabel = document.getElementById('status-label');
@@ -433,6 +436,97 @@ function clearAnalyticsModalWatchdog() {
     clearTimeout(analyticsModalState.watchdogId);
     analyticsModalState.watchdogId = null;
   }
+}
+
+function getAuthenticatedUser() {
+  if (!root) {
+    return null;
+  }
+  const stored = window.localStorage?.getItem(AUTH_STORAGE_KEY);
+  if (stored) {
+    try {
+      return JSON.parse(stored);
+    } catch (error) {
+      console.warn('Failed to parse stored auth user.', error);
+    }
+  }
+  const userId = root.dataset.userId;
+  if (!userId) {
+    return null;
+  }
+  return {
+    id: userId,
+    email: root.dataset.email || ''
+  };
+}
+
+function setAuthenticatedUser(user) {
+  if (!root) {
+    return;
+  }
+  root.dataset.userId = user.id;
+  root.dataset.email = user.email || '';
+  if (window.localStorage) {
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+  }
+}
+
+function renderAuth() {
+  authGate?.classList.remove('hidden');
+  root?.classList.add('hidden');
+  closeUsageModal();
+}
+
+function initializeAppForAuthenticatedUser() {
+  if (appInitialized) {
+    return;
+  }
+  appInitialized = true;
+  updateCreditUI();
+  refreshAnalyticsAndThrottle({ force: false }).catch((error) => {
+    console.warn('Usage analytics refresh failed.', error);
+  });
+}
+
+function renderApp() {
+  authGate?.classList.add('hidden');
+  root?.classList.remove('hidden');
+  initializeAppForAuthenticatedUser();
+}
+
+function renderUI() {
+  if (uiState === UI_STATE.AUTH) {
+    showAnalytics = false;
+    renderAuth();
+    return;
+  }
+  renderApp();
+  if (showAnalytics) {
+    openUsageModal();
+  } else {
+    closeUsageModal();
+  }
+}
+
+function bootstrapApp() {
+  const user = getAuthenticatedUser();
+  if (!user) {
+    uiState = UI_STATE.AUTH;
+    showAnalytics = false;
+    renderUI();
+    return;
+  }
+  uiState = UI_STATE.APP;
+  showAnalytics = false;
+  renderUI();
+}
+
+function onAnalyticsClick() {
+  if (uiState !== UI_STATE.APP) {
+    return;
+  }
+  showAnalytics = true;
+  renderUI();
 }
 
 function closeAllModals() {
@@ -1699,7 +1793,10 @@ async function initializeUsageFilters() {
 }
 
 function openUsageModal() {
-  if (!usageModal) {
+  if (!usageModal || uiState !== UI_STATE.APP) {
+    return;
+  }
+  if (analyticsModalState.open) {
     return;
   }
   analyticsModalState.open = true;
@@ -1715,6 +1812,7 @@ function closeUsageModal() {
   if (!usageModal) {
     return;
   }
+  showAnalytics = false;
   analyticsModalState.open = false;
   analyticsModalState.loading = false;
   analyticsModalState.error = null;
@@ -2178,6 +2276,9 @@ function updateThrottleState({ estimatedNextCost = 0 } = {}) {
 }
 
 async function refreshAnalyticsAndThrottle({ force = false } = {}) {
+  if (uiState !== UI_STATE.APP) {
+    return null;
+  }
   const data = await fetchUsageAnalytics({ force });
   if (!data) {
     return null;
@@ -3730,6 +3831,19 @@ if (creditBadge && creditPanel) {
   });
 }
 
+if (authButtons.length) {
+  authButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const userId = button.dataset.userId || 'user_demo';
+      const email = button.dataset.userEmail || 'demo@maya.dev';
+      setAuthenticatedUser({ id: userId, email });
+      uiState = UI_STATE.APP;
+      showAnalytics = false;
+      renderUI();
+    });
+  });
+}
+
 if (usageOpenButtons.length && usageModal) {
   usageOpenButtons.forEach((button) => {
     button.addEventListener('click', (event) => {
@@ -3737,7 +3851,7 @@ if (usageOpenButtons.length && usageModal) {
       event.stopPropagation();
       creditPanel?.classList.add('hidden');
       creditBadge?.setAttribute('aria-expanded', 'false');
-      openUsageModal();
+      onAnalyticsClick();
     });
   });
 }
@@ -3849,7 +3963,6 @@ if (usageFilters) {
     initializeUsageFilters().then(() => {
       refreshUsageView();
     });
-    openUsageModal();
   }
 }
 
@@ -3963,10 +4076,6 @@ document.addEventListener('DOMContentLoaded', () => {
     sandboxStopButton.addEventListener('click', stopSandboxFromUser);
   }
 
-  updateCreditUI();
-  refreshAnalyticsAndThrottle({ force: false }).catch((error) => {
-    console.warn('Usage analytics refresh failed.', error);
-  });
 });
 
 codeEditor.addEventListener('keydown', (event) => {
