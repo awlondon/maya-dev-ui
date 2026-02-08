@@ -13,6 +13,8 @@ const githubLogPath = process.env.GITHUB_USAGE_LOG_PATH || 'data/usage_log.csv';
 const githubLogBranch = process.env.GITHUB_USAGE_LOG_BRANCH || '';
 const githubApiBase = process.env.GITHUB_API_BASE || '';
 
+const TOKENS_PER_CREDIT = 250;
+const CREDIT_RESERVE_MULTIPLIER = 1.25;
 const OUTPUT_ESTIMATE_MULTIPLIER = {
   code: 2.5,
   text: 1.2,
@@ -37,13 +39,18 @@ function estimateTokensFromChars(charCount, charsPerToken) {
   return Math.ceil(charCount / charsPerToken);
 }
 
-function estimateCreditUpperBound({ inputChars, intentType }) {
-  const inputTokens = estimateTokensFromChars(inputChars, 4);
-  const outputMultiplier = OUTPUT_ESTIMATE_MULTIPLIER[intentType] ?? 1.2;
-  const outputTokens = Math.ceil(inputTokens * outputMultiplier);
-  const multiplier = intentType === 'code' ? 1.0 : 0.6;
-  const totalTokens = Math.ceil((inputTokens + outputTokens) * multiplier);
-  return Math.ceil(totalTokens / 250);
+function estimateCreditsFromTokens(tokenCount) {
+  if (!Number.isFinite(tokenCount) || tokenCount <= 0) {
+    return 0;
+  }
+  return Math.ceil(tokenCount / TOKENS_PER_CREDIT);
+}
+
+function estimateReservedCredits(estimatedCredits) {
+  if (!Number.isFinite(estimatedCredits) || estimatedCredits <= 0) {
+    return 0;
+  }
+  return Math.ceil(estimatedCredits * CREDIT_RESERVE_MULTIPLIER);
 }
 
 function parseCsvRow(row) {
@@ -217,20 +224,20 @@ app.post('/api/chat', async (req, res) => {
   const totalEstTokens = inputEstTokens + outputEstTokens;
 
   const remainingCredits = normalizeNumber(user?.remainingCredits);
-  const estimatedMaxCredits = estimateCreditUpperBound({
-    inputChars,
-    intentType: resolvedIntent
-  });
+  const estimatedCredits = estimateCreditsFromTokens(inputEstTokens);
+  const reservedCredits = estimateReservedCredits(estimatedCredits);
 
   if (
     remainingCredits !== null
-    && estimatedMaxCredits !== null
-    && remainingCredits < estimatedMaxCredits
+    && reservedCredits !== null
+    && remainingCredits < reservedCredits
   ) {
     res.status(402).json({
       error: 'INSUFFICIENT_CREDITS',
       message: 'This request may exceed your remaining credits.',
-      requestId
+      requestId,
+      estimatedCredits,
+      reservedCredits
     });
     return;
   }
@@ -255,7 +262,7 @@ app.post('/api/chat', async (req, res) => {
       const throttle = checkDailyThrottle({
         planTier,
         creditsUsedToday: usedToday,
-        estimatedNextCost: estimatedMaxCredits
+        estimatedNextCost: reservedCredits
       });
       if (!throttle.allowed) {
         const entry = {
@@ -271,6 +278,10 @@ app.post('/api/chat', async (req, res) => {
           output_chars: 0,
           output_est_tokens: 0,
           total_est_tokens: totalEstTokens,
+          estimated_credits: estimatedCredits,
+          reserved_credits: reservedCredits,
+          actual_credits: 0,
+          refunded_credits: 0,
           credits_charged: 0,
           latency_ms: 0,
           status: 'blocked'
@@ -326,6 +337,10 @@ app.post('/api/chat', async (req, res) => {
         output_chars: 0,
         output_est_tokens: 0,
         total_est_tokens: totalEstTokens,
+        estimated_credits: estimatedCredits,
+        reserved_credits: reservedCredits,
+        actual_credits: 0,
+        refunded_credits: 0,
         credits_charged: 0,
         latency_ms: latencyMs,
         status: 'error'
@@ -349,12 +364,22 @@ app.post('/api/chat', async (req, res) => {
     const data = await upstream.json();
     const outputChars = String(data?.choices?.[0]?.message?.content || '').length;
     const outputEstTokens = estimateTokensFromChars(outputChars, 3);
-    const totalTokens = inputEstTokens + outputEstTokens;
-    const creditsCharged = calculateCreditsUsed({
+    const fallbackTotalTokens = inputEstTokens + outputEstTokens;
+    const totalTokens = Number.isFinite(data?.usage?.total_tokens)
+      ? Number(data.usage.total_tokens)
+      : fallbackTotalTokens;
+    const actualCredits = calculateCreditsUsed({
       inputChars,
       outputChars,
-      intentType: resolvedIntent
+      intentType: resolvedIntent,
+      totalTokens
     });
+    const creditsCharged = reservedCredits
+      ? Math.min(actualCredits, reservedCredits)
+      : actualCredits;
+    const refundedCredits = reservedCredits
+      ? Math.max(0, reservedCredits - creditsCharged)
+      : 0;
     const updatedRemainingCredits = remainingCredits !== null
       ? Math.max(0, remainingCredits - creditsCharged)
       : null;
@@ -371,7 +396,11 @@ app.post('/api/chat', async (req, res) => {
       input_est_tokens: inputEstTokens,
       output_chars: outputChars,
       output_est_tokens: outputEstTokens,
-      total_est_tokens: totalTokens,
+      total_est_tokens: fallbackTotalTokens,
+      estimated_credits: estimatedCredits,
+      reserved_credits: reservedCredits,
+      actual_credits: actualCredits,
+      refunded_credits: refundedCredits,
       credits_charged: creditsCharged,
       latency_ms: latencyMs,
       status: 'success'
@@ -395,12 +424,17 @@ app.post('/api/chat', async (req, res) => {
       usage: {
         requestId,
         creditsCharged,
+        estimatedCredits,
+        reservedCredits,
+        actualCredits,
+        refundedCredits,
         remainingCredits: updatedRemainingCredits,
         inputChars,
         outputChars,
         inputEstTokens,
         outputEstTokens,
-        totalEstTokens: totalTokens,
+        totalEstTokens: fallbackTotalTokens,
+        totalTokens,
         latencyMs
       }
     });

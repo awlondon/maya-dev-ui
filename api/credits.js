@@ -1,8 +1,12 @@
 export function calculateCreditsUsed({
   inputChars,
   outputChars,
-  intentType
+  intentType,
+  totalTokens
 }) {
+  if (Number.isFinite(totalTokens)) {
+    return Math.ceil(totalTokens / 250);
+  }
   const inputTokens = Math.ceil((inputChars || 0) / 4);
   const outputTokens = Math.ceil((outputChars || 0) / 3);
 

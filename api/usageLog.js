@@ -37,6 +37,10 @@ export function serializeUsageLogRow(entry) {
     entry.output_chars,
     entry.output_est_tokens,
     entry.total_est_tokens,
+    entry.estimated_credits,
+    entry.reserved_credits,
+    entry.actual_credits,
+    entry.refunded_credits,
     entry.credits_charged,
     entry.latency_ms,
     entry.status
