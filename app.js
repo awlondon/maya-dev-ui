@@ -465,8 +465,19 @@ function hydrateCreditState() {
   }
 }
 
+function resolveCredits(credits) {
+  if (Number.isFinite(credits)) {
+    return credits;
+  }
+  const storedCredits = Number(window.localStorage?.getItem('maya_credits'));
+  if (Number.isFinite(storedCredits)) {
+    return storedCredits;
+  }
+  return 500;
+}
+
 function onAuthSuccess({ user, token, provider, credits }) {
-  const resolvedCredits = Number.isFinite(credits) ? credits : 500;
+  const resolvedCredits = resolveCredits(credits);
   Auth.user = user;
   Auth.token = token;
   Auth.provider = provider;
@@ -490,6 +501,7 @@ function onAuthSuccess({ user, token, provider, credits }) {
 async function handleGoogleCredential(response) {
   const res = await fetch('/auth/google', {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     // Google Identity Services returns a JWT ID token via response.credential.
     // Send as id_token to align with backend expectations.
@@ -607,6 +619,7 @@ function initAppleAuth() {
 
     const server = await fetch('/auth/apple', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: auth.code })
     });
@@ -915,19 +928,42 @@ function renderUI() {
   }
 }
 
-function bootstrapApp() {
+async function bootstrapSessionFromServer() {
+  try {
+    const res = await fetch('/me', { credentials: 'include' });
+    if (res.ok) {
+      const data = await res.json();
+      onAuthSuccess({
+        user: data.user,
+        token: data.token,
+        provider: data.user?.provider || data.provider,
+        credits: data.credits
+      });
+      return true;
+    }
+    if (res.status === 401) {
+      Auth.user = null;
+      Auth.token = null;
+      Auth.provider = null;
+      persistAuthState();
+    }
+  } catch (error) {
+    console.warn('Failed to bootstrap session from server.', error);
+  }
+  return false;
+}
+
+async function bootstrapApp() {
   hydrateAuthState();
   hydrateCreditState();
   applyAuthToRoot();
-  const token = window.localStorage?.getItem('maya_auth_token');
-  if (!token) {
-    uiState = UI_STATE.AUTH;
-    showAnalytics = false;
-    resetAppToUnauthed();
+  const sessionLoaded = await bootstrapSessionFromServer();
+  if (sessionLoaded) {
     return;
   }
+  const token = window.localStorage?.getItem('maya_auth_token');
   const user = getAuthenticatedUser();
-  if (!user) {
+  if (!token || !user) {
     uiState = UI_STATE.AUTH;
     showAnalytics = false;
     resetAppToUnauthed();
