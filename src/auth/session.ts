@@ -43,7 +43,7 @@ function getCookieValue(cookieHeader: string | null, name: string) {
   return null;
 }
 
-export async function getSession(request: Request, env: Env) {
+export async function getSessionFromRequest(request: Request, env: Env) {
   const token = getCookieValue(request.headers.get('Cookie'), SESSION_COOKIE_NAME);
   if (!token) {
     return null;
@@ -52,13 +52,6 @@ export async function getSession(request: Request, env: Env) {
   if (!valid) {
     return null;
   }
-  const payload: any = jwt.decode(token).payload;
-  return {
-    token,
-    user: {
-      id: payload.sub,
-      email: payload.email,
-      provider: payload.provider
-    }
-  };
+  const decoded = jwt.decode(token);
+  return decoded?.payload ?? null;
 }
