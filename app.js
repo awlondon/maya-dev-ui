@@ -113,6 +113,9 @@ const Auth = {
   token: null,
   provider: null
 };
+const GOOGLE_CLIENT_ID = window.GOOGLE_CLIENT_ID || '';
+const APPLE_CLIENT_ID = window.APPLE_CLIENT_ID || '';
+const APPLE_REDIRECT_URI = window.APPLE_REDIRECT_URI || '';
 
 const AUTH_STORAGE_KEYS = [
   'maya_auth_token',
@@ -288,7 +291,7 @@ function renderAuthModalHTML() {
   return `
     <h2>Welcome to Maya</h2>
 
-    <button class="auth-btn google" data-auth-provider="google">Continue with Google</button>
+    <div class="auth-btn google" data-auth-provider="google" role="button" aria-label="Continue with Google"></div>
     <button class="auth-btn apple" data-auth-provider="apple">Continue with Apple</button>
     <button class="auth-btn email" data-auth-provider="email">Sign up with Email</button>
 
@@ -296,6 +299,148 @@ function renderAuthModalHTML() {
       <input type="checkbox" checked />
       Receive product updates and announcements
     </label>
+  `;
+}
+
+function updateCreditsUI(credits) {
+  const resolvedCredits = Number.isFinite(credits) ? credits : 500;
+  if (root) {
+    root.dataset.remainingCredits = `${resolvedCredits}`;
+    root.dataset.creditsTotal = `${resolvedCredits}`;
+  }
+  updateCreditUI();
+}
+
+function hydrateCreditState() {
+  if (!window.localStorage) {
+    return;
+  }
+  const storedCredits = Number(window.localStorage.getItem('maya_credits'));
+  if (Number.isFinite(storedCredits)) {
+    updateCreditsUI(storedCredits);
+  }
+}
+
+function onAuthSuccess({ user, token, provider, credits }) {
+  const resolvedCredits = Number.isFinite(credits) ? credits : 500;
+  Auth.user = user;
+  Auth.token = token;
+  Auth.provider = provider;
+
+  window.localStorage?.setItem('maya_auth_token', token);
+  window.localStorage?.setItem('maya_user', JSON.stringify(user));
+  window.localStorage?.setItem('maya_provider', provider);
+  window.localStorage?.setItem('maya_credits', `${resolvedCredits}`);
+
+  document.body.classList.remove('unauthenticated');
+  applyAuthToRoot();
+  updateCreditsUI(resolvedCredits);
+
+  uiState = UI_STATE.APP;
+  showAnalytics = false;
+  renderUI();
+
+  ModalManager.close();
+}
+
+let googleAuthInitAttempts = 0;
+function initGoogleAuth() {
+  const button = document.querySelector('.auth-btn.google');
+  if (!button) {
+    return;
+  }
+  if (button.dataset.authInitialized === 'true') {
+    return;
+  }
+  if (!window.google?.accounts?.id) {
+    if (googleAuthInitAttempts < 10) {
+      googleAuthInitAttempts += 1;
+      setTimeout(initGoogleAuth, 200);
+    }
+    return;
+  }
+  if (!GOOGLE_CLIENT_ID) {
+    console.warn('Google auth client ID missing.');
+    return;
+  }
+
+  window.google.accounts.id.initialize({
+    client_id: GOOGLE_CLIENT_ID,
+    callback: async (response) => {
+      const res = await fetch('/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential: response.credential })
+      });
+
+      const data = await res.json();
+      onAuthSuccess({
+        user: data.user,
+        token: data.token,
+        provider: 'google',
+        credits: data.credits
+      });
+    }
+  });
+
+  window.google.accounts.id.renderButton(button, { theme: 'outline', size: 'large' });
+  button.dataset.authInitialized = 'true';
+}
+
+let appleAuthInitAttempts = 0;
+function initAppleAuth() {
+  const button = document.querySelector('.auth-btn.apple');
+  if (!button) {
+    return;
+  }
+  if (button.dataset.authInitialized === 'true') {
+    return;
+  }
+  if (!window.AppleID?.auth) {
+    if (appleAuthInitAttempts < 10) {
+      appleAuthInitAttempts += 1;
+      setTimeout(initAppleAuth, 200);
+    }
+    return;
+  }
+  if (!APPLE_CLIENT_ID || !APPLE_REDIRECT_URI) {
+    console.warn('Apple auth configuration missing.');
+    return;
+  }
+
+  window.AppleID.auth.init({
+    clientId: APPLE_CLIENT_ID,
+    scope: 'name email',
+    redirectURI: APPLE_REDIRECT_URI,
+    usePopup: true
+  });
+
+  button.onclick = async () => {
+    const res = await window.AppleID.auth.signIn();
+    const auth = res.authorization;
+
+    const server = await fetch('/auth/apple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: auth.code })
+    });
+
+    const data = await server.json();
+    onAuthSuccess({
+      user: data.user,
+      token: data.token,
+      provider: 'apple',
+      credits: data.credits
+    });
+  };
+  button.dataset.authInitialized = 'true';
+}
+
+function renderEmailModal() {
+  return `
+    <h3>Sign in with Email</h3>
+    <input id="emailInput" type="email" placeholder="you@example.com" />
+    <button id="sendLink">Send magic link</button>
   `;
 }
 
@@ -527,19 +672,31 @@ function resetAppToUnauthed() {
     }
   });
   const modalRoot = document.getElementById('modal-root');
-  const authButtons = modalRoot?.querySelectorAll('[data-auth-provider]') || [];
-  authButtons.forEach((button) => {
-    button.addEventListener('click', () => {
-      const provider = button.dataset.authProvider || 'email';
-      const userId = `user_${provider}`;
-      const email = `${provider}@maya.dev`;
-      setAuthenticatedUser({ id: userId, email }, provider);
-      uiState = UI_STATE.APP;
-      showAnalytics = false;
-      renderUI();
-    });
-  });
+  const emailButton = modalRoot?.querySelector('.auth-btn.email');
+  if (emailButton) {
+    emailButton.onclick = () => {
+      ModalManager.open(renderEmailModal());
+    };
+  }
+  initGoogleAuth();
+  initAppleAuth();
 }
+
+document.addEventListener('click', async (event) => {
+  if (event.target?.id !== 'sendLink') {
+    return;
+  }
+  const email = document.getElementById('emailInput')?.value?.trim();
+  if (!email) {
+    return;
+  }
+  await fetch('/auth/email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email })
+  });
+  ModalManager.open('<p>Check your inbox.</p>');
+});
 
 async function signOut() {
   console.log('🔒 Signing out user');
@@ -611,12 +768,20 @@ function renderUI() {
 
 function bootstrapApp() {
   hydrateAuthState();
+  hydrateCreditState();
   applyAuthToRoot();
+  const token = window.localStorage?.getItem('maya_auth_token');
+  if (!token) {
+    uiState = UI_STATE.AUTH;
+    showAnalytics = false;
+    resetAppToUnauthed();
+    return;
+  }
   const user = getAuthenticatedUser();
   if (!user) {
     uiState = UI_STATE.AUTH;
     showAnalytics = false;
-    renderUI();
+    resetAppToUnauthed();
     return;
   }
   uiState = UI_STATE.APP;
