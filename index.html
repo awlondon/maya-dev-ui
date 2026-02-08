@@ -570,5 +570,36 @@
     window.GOOGLE_CLIENT_ID = "136741418395-m12209atcs99mia868fh6o3m266u7noa.apps.googleusercontent.com";
   </script>
   <script type="module" src="app.js"></script>
+  <div id="auth-debug-panel" class="auth-debug hidden">
+    <div class="auth-debug-header">
+      Auth Debug (dev-only)
+      <button id="authDebugRefresh">↻</button>
+    </div>
+
+    <div class="auth-debug-row">
+      <span>Environment</span>
+      <code id="authDebugEnv"></code>
+    </div>
+
+    <div class="auth-debug-row">
+      <span>Session cookie present</span>
+      <code id="authDebugCookie"></code>
+    </div>
+
+    <div class="auth-debug-row">
+      <span>/me status</span>
+      <code id="authDebugMeStatus"></code>
+    </div>
+
+    <div class="auth-debug-row">
+      <span>User</span>
+      <pre id="authDebugUser"></pre>
+    </div>
+
+    <div class="auth-debug-row">
+      <span>Last auth attempt</span>
+      <code id="authDebugLastProvider"></code>
+    </div>
+  </div>
 </body>
 </html>

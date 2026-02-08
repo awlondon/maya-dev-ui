@@ -91,6 +91,7 @@ const EmailAuthSlot = (() => {
         return;
       }
 
+      markAuthAttempt('email');
       state = 'sending';
       render();
 
@@ -117,6 +118,66 @@ const EmailAuthSlot = (() => {
     }
   };
 })();
+
+const isAuthDebugEnabled =
+  location.hostname === 'localhost' ||
+  location.hostname.startsWith('dev.') ||
+  new URLSearchParams(location.search).has('authDebug');
+
+let lastAuthProvider = '—';
+
+export function markAuthAttempt(provider) {
+  lastAuthProvider = provider;
+}
+
+async function refreshAuthDebug() {
+  const panel = document.getElementById('auth-debug-panel');
+  if (!panel) return;
+
+  document.getElementById('authDebugEnv').textContent = location.origin;
+
+  document.getElementById('authDebugCookie').textContent =
+    document.cookie.includes('maya_session')
+      ? 'present'
+      : 'not visible';
+
+  try {
+    const res = await fetch('/me', { credentials: 'include' });
+    document.getElementById('authDebugMeStatus').textContent =
+      `${res.status}`;
+
+    if (res.ok) {
+      const data = await res.json();
+      document.getElementById('authDebugUser').textContent =
+        JSON.stringify(data.user, null, 2);
+    } else {
+      document.getElementById('authDebugUser').textContent = '—';
+    }
+  } catch {
+    document.getElementById('authDebugMeStatus').textContent = 'network error';
+    document.getElementById('authDebugUser').textContent = '—';
+  }
+
+  document.getElementById('authDebugLastProvider').textContent =
+    lastAuthProvider;
+}
+
+function initAuthDebugPanel() {
+  if (!isAuthDebugEnabled) {
+    return;
+  }
+
+  const panel = document.getElementById('auth-debug-panel');
+  if (!panel) return;
+
+  panel.classList.remove('hidden');
+
+  document
+    .getElementById('authDebugRefresh')
+    ?.addEventListener('click', refreshAuthDebug);
+
+  refreshAuthDebug();
+}
 
 const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
@@ -496,9 +557,12 @@ function onAuthSuccess({ user, token, provider, credits }) {
   renderUI();
 
   ModalManager.close();
+
+  refreshAuthDebug();
 }
 
 async function handleGoogleCredential(response) {
+  markAuthAttempt('google');
   const res = await fetch(`${BACKEND_URL}/auth/google`, {
     method: 'POST',
     credentials: 'include',
@@ -513,6 +577,7 @@ async function handleGoogleCredential(response) {
     console.warn('Google auth failed.', data);
     return;
   }
+  refreshAuthDebug();
   const sessionLoaded = await bootstrapSessionFromServer();
   if (!sessionLoaded) {
     onAuthSuccess({
@@ -621,6 +686,7 @@ function initAppleAuth() {
   });
 
   button.onclick = async () => {
+    markAuthAttempt('apple');
     const res = await window.AppleID.auth.signIn();
     const auth = res.authorization;
 
@@ -961,6 +1027,7 @@ async function bootstrapSessionFromServer() {
 }
 
 async function bootstrapApp() {
+  initAuthDebugPanel();
   hydrateAuthState();
   hydrateCreditState();
   applyAuthToRoot();
