@@ -1,5 +1,8 @@
 import jwt from '@tsndr/cloudflare-worker-jwt';
 
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const SESSION_COOKIE_NAME = 'session';
+
 export async function issueSession(user: any, env: Env) {
   const token = await jwt.sign(
     {
@@ -20,7 +23,7 @@ export async function issueSession(user: any, env: Env) {
     {
       headers: {
         'Content-Type': 'application/json',
-        'Set-Cookie': `session=${token}; Path=/; HttpOnly; Secure; SameSite=None`
+        'Set-Cookie': `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${SESSION_MAX_AGE_SECONDS}`
       }
     }
   );
@@ -41,7 +44,7 @@ function getCookieValue(cookieHeader: string | null, name: string) {
 }
 
 export async function getSession(request: Request, env: Env) {
-  const token = getCookieValue(request.headers.get('Cookie'), 'session');
+  const token = getCookieValue(request.headers.get('Cookie'), SESSION_COOKIE_NAME);
   if (!token) {
     return null;
   }

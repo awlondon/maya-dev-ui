@@ -9,6 +9,8 @@ const GITHUB_API = 'https://api.github.com';
 const ANALYTICS_CACHE_TTL_SECONDS = 60 * 10;
 const DEFAULT_ANALYTICS_DAYS = 14;
 const MAX_ANALYTICS_DAYS = 365;
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+const SESSION_COOKIE_NAME = 'session';
 const REQUIRED_USER_HEADERS = [
   'user_id',
   'email',
@@ -45,6 +47,17 @@ export default {
 
     if (url.pathname === '/auth/google' && request.method === 'POST') {
       return handleGoogleAuth(request, env);
+    }
+
+    if (url.pathname === '/me') {
+      if (request.method !== 'GET') {
+        return new Response('Method not allowed', { status: 405 });
+      }
+      const session = await getSession(request, env);
+      if (!session) {
+        return json({ error: 'Unauthorized' }, 401);
+      }
+      return json(session, 200);
     }
 
     if (url.pathname === '/usage/analytics' && request.method === 'GET') {
@@ -506,10 +519,62 @@ async function issueSession(user, env) {
       status: 200,
       headers: {
         'content-type': 'application/json',
-        'set-cookie': `session=${token}; Path=/; HttpOnly; Secure; SameSite=None`
+        'set-cookie': `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${SESSION_MAX_AGE_SECONDS}`
       }
     }
   );
+}
+
+function getCookieValue(cookieHeader, name) {
+  if (!cookieHeader) {
+    return null;
+  }
+  const cookies = cookieHeader.split(';');
+  for (const entry of cookies) {
+    const [key, ...rest] = entry.trim().split('=');
+    if (key === name) {
+      return rest.join('=');
+    }
+  }
+  return null;
+}
+
+function timingSafeEqualString(a, b) {
+  if (a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return out === 0;
+}
+
+async function verifySessionToken(token, secret) {
+  const decoded = decodeJwtParts(token);
+  if (!decoded) return null;
+  const expectedSignature = await hmacSHA256Base64Url(secret, decoded.signingInput);
+  if (!timingSafeEqualString(expectedSignature, decoded.signature)) {
+    return null;
+  }
+  return decoded.payload;
+}
+
+async function getSession(request, env) {
+  const token = getCookieValue(request.headers.get('cookie'), SESSION_COOKIE_NAME);
+  if (!token || !env.SESSION_SECRET) {
+    return null;
+  }
+  const payload = await verifySessionToken(token, env.SESSION_SECRET);
+  if (!payload) {
+    return null;
+  }
+  return {
+    token,
+    user: {
+      id: payload.sub,
+      email: payload.email,
+      provider: payload.provider
+    }
+  };
 }
 
 async function handleUsageAnalytics(request, env, ctx) {
