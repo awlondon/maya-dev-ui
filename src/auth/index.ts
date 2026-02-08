@@ -1,4 +1,5 @@
 import { handleGoogle } from './providers/google';
+import { requestEmailLink, verifyEmailToken } from './providers/email';
 import { jsonError } from './errors';
 
 export async function handleAuth(request: Request, env: Env) {
@@ -12,12 +13,15 @@ export async function handleAuth(request: Request, env: Env) {
     case '/auth/google':
       return handleGoogle(request, env);
 
+    case '/auth/email/request':
+      return requestEmailLink(request, env);
+
+    case '/auth/email/verify':
+      return verifyEmailToken(request, env);
+
     // future
     // case '/auth/apple':
     //   return handleApple(request, env);
-
-    // case '/auth/email':
-    //   return handleEmail(request, env);
 
     default:
       return jsonError('Unknown auth provider', 404);
