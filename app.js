@@ -291,7 +291,9 @@ function renderAuthModalHTML() {
   return `
     <h2>Welcome to Maya</h2>
 
-    <div id="google-signin" class="auth-provider google" aria-label="Continue with Google"></div>
+    <div class="auth-row">
+      <div id="google-signin"></div>
+    </div>
     <button class="auth-btn apple" data-auth-provider="apple">Continue with Apple</button>
     <button class="auth-btn email" data-auth-provider="email">Sign up with Email</button>
 
@@ -343,20 +345,9 @@ function onAuthSuccess({ user, token, provider, credits }) {
   ModalManager.close();
 }
 
-let googleAuthInitAttempts = 0;
 function initGoogleAuth() {
-  const button = document.getElementById('google-signin');
-  if (!button) {
-    return;
-  }
-  if (button.dataset.authInitialized === 'true') {
-    return;
-  }
   if (!window.google?.accounts?.id) {
-    if (googleAuthInitAttempts < 10) {
-      googleAuthInitAttempts += 1;
-      setTimeout(initGoogleAuth, 200);
-    }
+    console.error('Google SDK not loaded');
     return;
   }
   if (!GOOGLE_CLIENT_ID) {
@@ -364,9 +355,19 @@ function initGoogleAuth() {
     return;
   }
 
-  button.textContent = '';
+  const container = document.getElementById('google-signin');
+  if (!container) {
+    console.error('Google signin container missing');
+    return;
+  }
+  if (container.dataset.authInitialized === 'true') {
+    return;
+  }
+
+  container.textContent = '';
   window.google.accounts.id.initialize({
     client_id: GOOGLE_CLIENT_ID,
+    ux_mode: 'popup',
     callback: async (response) => {
       const res = await fetch('/auth/google', {
         method: 'POST',
@@ -389,13 +390,13 @@ function initGoogleAuth() {
   // Render Google sign-in button with visible text using Google Identity Services option.
   // The 'text' property accepts values like 'signin_with', 'signup_with', 'continue_with', or 'signin'.
   // We specify 'continue_with' so the button reads 'Continue with Google'.
-  window.google.accounts.id.renderButton(button, {
+  window.google.accounts.id.renderButton(container, {
     theme: 'outline',
     size: 'large',
     text: 'continue_with',
-    width: 320
+    width: 360
   });
-  button.dataset.authInitialized = 'true';
+  container.dataset.authInitialized = 'true';
 }
 
 let appleAuthInitAttempts = 0;
