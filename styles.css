@@ -186,6 +186,31 @@ html, body {
   background: rgba(255, 255, 255, 0.06);
 }
 
+.email-auth {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 360px;
+}
+
+.email-input {
+  flex: 1;
+  height: 48px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: white;
+}
+
+.email-sent {
+  width: 100%;
+  max-width: 360px;
+  text-align: center;
+  font-size: 14px;
+  opacity: 0.9;
+}
+
 .newsletter {
   display: flex;
   align-items: center;
