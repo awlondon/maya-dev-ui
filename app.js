@@ -578,13 +578,17 @@ function persistSessionStorage({ user, token }) {
   }
 }
 
-function onAuthSuccess({ user, token, provider, credits }) {
+function onAuthSuccess({ user, token, provider, credits, deferRender = false }) {
   const resolvedCredits = resolveCredits(credits);
   const planLabel = user?.plan || user?.plan_tier || user?.planTier || 'Free';
+  const storedToken = window.localStorage?.getItem('maya_token');
+  const resolvedToken = token
+    || storedToken
+    || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `token-${Date.now()}`);
   Auth.user = user;
-  Auth.token = token;
+  Auth.token = resolvedToken;
   Auth.provider = provider;
-  persistSessionStorage({ user, token });
+  persistSessionStorage({ user, token: resolvedToken });
   currentUser = {
     ...user,
     plan: planLabel,
@@ -601,9 +605,10 @@ function onAuthSuccess({ user, token, provider, credits }) {
 
   uiState = UI_STATE.APP;
   showAnalytics = false;
-  renderUI();
-
-  ModalManager.close();
+  if (!deferRender) {
+    renderUI();
+    ModalManager.close();
+  }
 
   refreshAuthDebug();
 }
@@ -636,9 +641,11 @@ async function handleGoogleCredential(response) {
     return;
   }
 
-  const { user, token } = await meRes.json();
+  const { user } = await meRes.json();
   Auth.user = user ?? null;
-  Auth.token = token ?? null;
+  Auth.token = Auth.token
+    || window.localStorage?.getItem('maya_token')
+    || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `token-${Date.now()}`);
   Auth.provider = user?.provider ?? 'google';
   applyAuthToRoot();
   updateCreditsUI(user?.creditsRemaining ?? 500);
@@ -1061,18 +1068,11 @@ function renderUI() {
   }
 }
 
-async function bootstrapSessionFromServer() {
+async function hydrateSessionFromServer() {
   try {
     const res = await fetch(`/api/me`, { credentials: 'include' });
     if (res.ok) {
-      const data = await res.json();
-      onAuthSuccess({
-        user: data.user,
-        token: data.token,
-        provider: data.user?.provider || data.provider,
-        credits: data.credits
-      });
-      return true;
+      return await res.json();
     }
     if (res.status === 401) {
       Auth.user = null;
@@ -1082,7 +1082,7 @@ async function bootstrapSessionFromServer() {
   } catch (error) {
     console.warn('Failed to bootstrap session from server.', error);
   }
-  return false;
+  return null;
 }
 
 async function checkEmailVerification() {
@@ -1119,13 +1119,19 @@ async function checkEmailVerification() {
 
 async function bootstrapApp() {
   await checkEmailVerification();
+  const sessionData = await hydrateSessionFromServer();
+  if (sessionData?.user) {
+    onAuthSuccess({
+      user: sessionData.user,
+      token: sessionData.token,
+      provider: sessionData.user?.provider || sessionData.provider,
+      credits: sessionData.credits,
+      deferRender: true
+    });
+  }
   initAuthDebugPanel();
   hydrateCreditState();
   applyAuthToRoot();
-  const sessionLoaded = await bootstrapSessionFromServer();
-  if (sessionLoaded) {
-    return;
-  }
   const user = getAuthenticatedUser();
   if (!user) {
     uiState = UI_STATE.AUTH;
@@ -1135,7 +1141,7 @@ async function bootstrapApp() {
   }
   uiState = UI_STATE.APP;
   showAnalytics = false;
-  renderUI();
+  renderApp();
 }
 
 function onAnalyticsClick() {
