@@ -26,6 +26,7 @@ const DAILY_LIMITS = {
   pro: 2000,
   power: 10000
 };
+const SESSION_COOKIE_NAME = 'session';
 
 function normalizeNumber(value) {
   const numeric = Number(value);
@@ -140,6 +141,71 @@ function decodeBase64(value) {
   return atob(value);
 }
 
+function decodeBase64Url(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const paddingNeeded = (4 - (normalized.length % 4)) % 4;
+  const padded = normalized + '='.repeat(paddingNeeded);
+  return decodeBase64(padded);
+}
+
+function getCookieValue(cookieHeader, name) {
+  if (!cookieHeader) {
+    return null;
+  }
+  const cookies = cookieHeader.split(';');
+  for (const entry of cookies) {
+    const [key, ...rest] = entry.trim().split('=');
+    if (key === name) {
+      return rest.join('=');
+    }
+  }
+  return null;
+}
+
+function timingSafeEqualString(a, b) {
+  if (a.length !== b.length) return false;
+  const bufferA = Buffer.from(a);
+  const bufferB = Buffer.from(b);
+  return crypto.timingSafeEqual(bufferA, bufferB);
+}
+
+function decodeJwtParts(token) {
+  if (!token || typeof token !== 'string') {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return null;
+  }
+  const [headerPart, payloadPart, signature] = parts;
+  const signingInput = `${headerPart}.${payloadPart}`;
+  let payload;
+  try {
+    payload = JSON.parse(decodeBase64Url(payloadPart));
+  } catch (error) {
+    return null;
+  }
+  return { payload, signature, signingInput };
+}
+
+function verifyJwt(token, secret) {
+  if (!secret) {
+    return null;
+  }
+  const decoded = decodeJwtParts(token);
+  if (!decoded) {
+    return null;
+  }
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(decoded.signingInput)
+    .digest('base64url');
+  if (!timingSafeEqualString(decoded.signature, expectedSignature)) {
+    return null;
+  }
+  return decoded.payload;
+}
+
 async function readUsersCsv(githubEnv) {
   const apiBase = githubEnv.GITHUB_API_BASE || 'https://api.github.com';
   const repo = githubEnv.GITHUB_REPO;
@@ -189,6 +255,27 @@ function getRequestId() {
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static('.'));
+
+app.get('/me', (req, res) => {
+  const token = getCookieValue(req.headers.cookie, SESSION_COOKIE_NAME);
+  if (!token) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const payload = verifyJwt(token, process.env.SESSION_SECRET);
+  if (!payload) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  res.json({
+    token,
+    user: {
+      id: payload.sub,
+      email: payload.email,
+      provider: payload.provider
+    }
+  });
+});
 
 app.post('/api/chat', async (req, res) => {
   const { messages, prompt, user, sessionId, intentType } = req.body || {};
