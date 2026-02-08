@@ -147,7 +147,7 @@ async function refreshAuthDebug() {
       `${res.status}`;
     const authState = uiState === UI_STATE.APP ? 'authenticated' : 'unauthenticated';
     if (isAuthDebugEnabled && authState === 'authenticated' && res.status !== 200) {
-      console.error('[AUTH INVARIANT FAILED] authenticated but /me != 200');
+      console.error('[AUTH INVARIANT FAILED]', 'authenticated=true but /me != 200');
     }
 
     if (res.ok) {

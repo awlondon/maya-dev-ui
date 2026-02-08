@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test('app rehydrates authenticated session', async ({ page, context }) => {
+test('app rehydrates session and hides auth modal', async ({ page, context }) => {
   const sessionCookie = process.env.TEST_SESSION_COOKIE;
   if (!sessionCookie) {
     throw new Error('Missing TEST_SESSION_COOKIE');

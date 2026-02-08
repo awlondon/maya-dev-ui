@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --import tsx tests/auth.*.test.ts",
-    "test:ui": "playwright test tests/ui.auth.rehydrate.spec.ts"
+    "test": "node --test --import tsx api/tests/auth.*.test.ts",
+    "test:ui": "playwright test ui/tests/auth.rehydrate.spec.ts"
   },
   "dependencies": {
     "express": "^4.19.2"
