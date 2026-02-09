@@ -1,4 +1,5 @@
 import { createSandboxController } from './sandboxController.js';
+import { formatNumber } from './utils/formatNumber.js';
 
 if (!window.GOOGLE_CLIENT_ID) {
   console.warn('Missing GOOGLE_CLIENT_ID. Google auth disabled.');
@@ -1964,13 +1965,6 @@ function formatArtifactDate(dateValue) {
   });
 }
 
-function formatNumber(value) {
-  if (!Number.isFinite(value)) {
-    return '0';
-  }
-  return new Intl.NumberFormat().format(value);
-}
-
 function getArtifactOwnerHandle(artifact) {
   if (!artifact) {
     return 'unknown';
@@ -3669,10 +3663,6 @@ function parseCsv(text) {
 function toNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function formatNumber(value) {
-  return new Intl.NumberFormat('en-US').format(value);
 }
 
 function formatSeconds(ms) {
