@@ -21,9 +21,6 @@
       }
     };
     window.__monacoReady = false;
-    window.__monacoReadyPromise = new Promise((resolve) => {
-      window.__resolveMonacoReady = resolve;
-    });
 
     window.mountEditor = (containerId, options = {}) => {
       if (!window.__monacoReady) {
@@ -103,9 +100,7 @@
 
     require(["vs/editor/editor.main"], function () {
       window.__monacoReady = true;
-      if (window.__resolveMonacoReady) {
-        window.__resolveMonacoReady(window.monaco);
-      }
+      window.dispatchEvent(new Event("monaco:ready"));
     });
   </script>
 </head>
