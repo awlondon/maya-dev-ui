@@ -7,19 +7,21 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 const CHAT_SYSTEM_PROMPT = `You are an assistant embedded in a live coding UI.
 
-Return valid JSON only, with this schema:
+You MUST respond with valid JSON only. Do not wrap in markdown or code fences.
+Return ONLY the following schema with no extra top-level keys:
 
 {
-  "assistant": { "text": string },
+  "assistant": { "text": "string" },
   "ui": {
-    "html": string (optional),
-    "css": string (optional),
-    "js": string (optional)
+    "html": "string",
+    "css": "string",
+    "js": "string"
   }
 }
 
-If the user asks a question, respond with assistant.text.
-If the user asks to modify or generate UI, include ui.html/css/js.`;
+The "ui.html", "ui.css", and "ui.js" fields are optional but MUST be present as
+empty strings when not provided. If the user asks a question, respond with
+assistant.text. If the user asks to modify or generate UI, include ui.html/css/js.`;
 
 /**
  * 🔴 CORS MUST BE FIRST
@@ -67,10 +69,21 @@ app.post('/api/chat', (req, res) => {
     return;
   }
 
-  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  const messages = req.body?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    res.status(400).json({ error: 'Request body must include a messages array with at least one item.' });
+    return;
+  }
+
+  const sanitizedMessages = messages
+    .filter((message) => message && typeof message === 'object')
+    .map((message) => ({
+      role: typeof message.role === 'string' ? message.role : 'user',
+      content: typeof message.content === 'string' ? message.content : ''
+    }));
   const inputMessages = [
     { role: 'system', content: CHAT_SYSTEM_PROMPT },
-    ...messages
+    ...sanitizedMessages
   ];
 
   fetch('https://api.openai.com/v1/responses', {
@@ -95,18 +108,50 @@ app.post('/api/chat', (req, res) => {
         data?.output_text
         ?? data?.output?.[0]?.content?.[0]?.text
         ?? '';
-      let payload;
-      try {
-        payload = JSON.parse(outputText);
-      } catch {
-        payload = { assistant: { text: outputText || '' } };
+      if (!outputText || typeof outputText !== 'string') {
+        throw new Error('Model returned no output text.');
       }
+
+      const trimmed = outputText.trim();
+      const jsonCandidate = trimmed
+        .replace(/^```(?:json)?/i, '')
+        .replace(/```$/i, '')
+        .trim();
+      const firstBrace = jsonCandidate.indexOf('{');
+      const lastBrace = jsonCandidate.lastIndexOf('}');
+      const jsonString = firstBrace !== -1 && lastBrace !== -1
+        ? jsonCandidate.slice(firstBrace, lastBrace + 1)
+        : jsonCandidate;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonString);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown JSON parse error';
+        throw new Error(`Failed to parse model JSON response: ${message}`);
+      }
+
+      const assistantText = typeof parsed?.assistant?.text === 'string'
+        ? parsed.assistant.text
+        : '';
+      const ui = parsed?.ui ?? {};
+      const payload = {
+        assistant: {
+          text: assistantText
+        },
+        ui: {
+          html: typeof ui.html === 'string' ? ui.html : '',
+          css: typeof ui.css === 'string' ? ui.css : '',
+          js: typeof ui.js === 'string' ? ui.js : ''
+        }
+      };
+
       res.json(payload);
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       res.status(500).json({
-        assistant: { text: message || 'Sorry, something went wrong.' }
+        error: message || 'Sorry, something went wrong.'
       });
     });
 });
