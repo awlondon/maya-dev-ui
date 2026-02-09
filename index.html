@@ -27,6 +27,9 @@
         <p class="subtitle">Chat with the model, edit code, and run it live.</p>
       </div>
       <div class="top-bar-actions">
+        <button id="publicGalleryButton" class="ghost-button subtle" type="button">
+          Public Gallery
+        </button>
         <span id="status-label">Offline</span>
         <div id="creditBadge" class="credit-badge" role="button" tabindex="0" aria-haspopup="dialog" aria-expanded="false">
           <span class="icon" aria-hidden="true"></span>
@@ -46,6 +49,10 @@
           <div class="user-dropdown" id="userMenu">
             <button class="menu-item" id="accountLink">
               Account
+            </button>
+
+            <button class="menu-item" id="galleryLink">
+              My Gallery
             </button>
 
             <button class="menu-item" id="upgradePlan">
@@ -216,6 +223,39 @@
 
       <section class="account-section">
         <div class="account-section-header">
+          <h3>Saved code</h3>
+          <p>Artifacts distilled from your sessions.</p>
+        </div>
+        <div class="account-grid">
+          <div class="account-card">
+            <div class="account-field">
+              <span class="account-label">Private artifacts</span>
+              <span id="accountArtifactsPrivate" class="account-value">—</span>
+            </div>
+            <div class="account-field">
+              <span class="account-label">Public artifacts</span>
+              <span id="accountArtifactsPublic" class="account-value">—</span>
+            </div>
+          </div>
+          <div class="account-card">
+            <div class="account-field">
+              <span class="account-label">Gallery</span>
+              <span class="account-value">Manage and publish artifacts.</span>
+            </div>
+            <div class="account-field">
+              <span class="account-label">Public profile</span>
+              <span class="account-value">Coming soon.</span>
+            </div>
+          </div>
+        </div>
+        <div class="account-action-row">
+          <button id="accountViewGallery" class="ghost-button" type="button">View Gallery</button>
+          <button id="accountViewPublicGallery" class="ghost-button subtle" type="button">View Public Gallery</button>
+        </div>
+      </section>
+
+      <section class="account-section">
+        <div class="account-section-header">
           <h3>Usage history</h3>
           <p>Session-level usage over the last 30 days.</p>
         </div>
@@ -345,9 +385,14 @@
         <section id="code-panel" class="panel code-editor">
           <div class="panel-header">
             <span>Code Editor</span>
-            <button id="copyCodeBtn" class="icon-button" title="Copy code" type="button">
-              📋
-            </button>
+            <div class="panel-header-actions">
+              <button id="saveCodeBtn" class="icon-button" title="Save code" type="button" disabled>
+                💾
+              </button>
+              <button id="copyCodeBtn" class="icon-button" title="Copy code" type="button">
+                📋
+              </button>
+            </div>
           </div>
           <div id="code-editor-wrapper">
             <div id="line-numbers" aria-hidden="true"></div>
@@ -409,6 +454,44 @@
         </div>
       </div>
     </div>
+    </main>
+
+    <main id="gallery-page" class="gallery-page hidden" aria-label="Saved code gallery">
+      <div class="gallery-header">
+        <div>
+          <h2>Saved code</h2>
+          <p class="gallery-subtitle">Artifacts distilled from your sessions.</p>
+        </div>
+        <div class="gallery-actions">
+          <button id="galleryBackButton" class="ghost-button" type="button">Back to workspace</button>
+        </div>
+      </div>
+      <div class="gallery-filters">
+        <span class="gallery-muted">Private gallery</span>
+      </div>
+      <div id="galleryGrid" class="gallery-grid"></div>
+      <div id="galleryEmpty" class="gallery-empty hidden">
+        No artifacts saved yet. Use “Save Code” to create your first artifact.
+      </div>
+    </main>
+
+    <main id="public-gallery-page" class="gallery-page hidden" aria-label="Public gallery">
+      <div class="gallery-header">
+        <div>
+          <h2>Public gallery</h2>
+          <p class="gallery-subtitle">Explore public artifacts and import them into your workspace.</p>
+        </div>
+        <div class="gallery-actions">
+          <button id="publicGalleryBackButton" class="ghost-button" type="button">Back to workspace</button>
+        </div>
+      </div>
+      <div class="gallery-filters">
+        <span class="gallery-muted">Public artifacts</span>
+      </div>
+      <div id="publicGalleryGrid" class="gallery-grid"></div>
+      <div id="publicGalleryEmpty" class="gallery-empty hidden">
+        No public artifacts yet.
+      </div>
     </main>
 
     <div id="pricing-modal" class="pricing-modal hidden" role="dialog" aria-modal="true" aria-labelledby="pricing-title">

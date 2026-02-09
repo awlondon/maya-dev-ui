@@ -2553,6 +2553,165 @@ button:disabled {
   padding: 20px 0;
 }
 
+.gallery-page {
+  padding: 32px;
+}
+
+.gallery-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.gallery-subtitle {
+  color: var(--muted);
+}
+
+.gallery-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.gallery-filters {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.gallery-muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 18px;
+}
+
+.gallery-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--muted);
+}
+
+.artifact-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.artifact-thumb {
+  position: relative;
+  background: #0f1115;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+.artifact-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.artifact-placeholder {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.85rem;
+}
+
+.artifact-visibility {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+
+.artifact-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.artifact-body h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.artifact-body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.artifact-fork-label {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.artifact-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.modal-field input,
+.modal-field textarea,
+.modal-field select {
+  background: #10131a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}
+
+.artifact-modal-preview {
+  width: 100%;
+  border-radius: 12px;
+  margin-top: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.code-editor textarea.is-locked {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 @media (max-width: 1000px) {
   #workspace {
     grid-template-columns: 1fr;
