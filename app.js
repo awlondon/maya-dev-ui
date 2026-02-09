@@ -1173,6 +1173,10 @@ function clearChatState() {
   pendingAssistantProposal = null;
   intentAnchor = null;
   chatState.locked = false;
+  if (sessionState) {
+    sessionState.messages = [];
+    scheduleSessionStatePersist();
+  }
   if (chatState.unlockTimerId) {
     clearTimeout(chatState.unlockTimerId);
     chatState.unlockTimerId = null;
@@ -1180,8 +1184,22 @@ function clearChatState() {
   updateClearChatButtonState();
 }
 
+const SESSION_STATE_SCHEMA_VERSION = '1.2';
+const SESSION_STATE_STORAGE_KEY_PREFIX = 'maya_session_state:';
+const SESSION_STATE_DB_NAME = 'mayaSessionState';
+const SESSION_STATE_STORE_NAME = 'sessions';
+const SESSION_STATE_PERSIST_DEBOUNCE_MS = 500;
+
+let sessionState = null;
+let sessionStatePersistTimer = null;
+let sessionStateDbPromise = null;
+
 function getVersionStorageKey(id = sessionId) {
   return `maya_code_versions:${id || 'default'}`;
+}
+
+function getSessionStateStorageKey(id = sessionId) {
+  return `${SESSION_STATE_STORAGE_KEY_PREFIX}${id || 'default'}`;
 }
 
 function generateVersionId() {
@@ -1190,12 +1208,177 @@ function generateVersionId() {
     : `version-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function generateMessageId() {
+  return window.crypto?.randomUUID
+    ? window.crypto.randomUUID()
+    : `message-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createInitialSessionState() {
+  return {
+    session_id: sessionId,
+    started_at: sessionStartedAt || new Date().toISOString(),
+    current_editor: {
+      language: 'html',
+      content: codeEditor?.value ?? defaultInterfaceCode,
+      version_id: ''
+    },
+    messages: [],
+    code_versions: [],
+    active_version_index: -1
+  };
+}
+
+function openSessionStateDb() {
+  if (!window.indexedDB) {
+    return Promise.resolve(null);
+  }
+  if (sessionStateDbPromise) {
+    return sessionStateDbPromise;
+  }
+  sessionStateDbPromise = new Promise((resolve) => {
+    const request = window.indexedDB.open(SESSION_STATE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SESSION_STATE_STORE_NAME)) {
+        db.createObjectStore(SESSION_STATE_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+  return sessionStateDbPromise;
+}
+
+async function loadSessionStateFromIndexedDb(key) {
+  const db = await openSessionStateDb();
+  if (!db) {
+    return null;
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(SESSION_STATE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(SESSION_STATE_STORE_NAME);
+    const request = store.get(key);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => resolve(null);
+  });
+}
+
+async function saveSessionStateToIndexedDb(key, payload) {
+  const db = await openSessionStateDb();
+  if (!db) {
+    return;
+  }
+  const tx = db.transaction(SESSION_STATE_STORE_NAME, 'readwrite');
+  tx.objectStore(SESSION_STATE_STORE_NAME).put(payload, key);
+}
+
+function normalizeSessionState(raw) {
+  if (!raw) {
+    return null;
+  }
+  const state = raw.session_state || raw;
+  if (!state || typeof state !== 'object') {
+    return null;
+  }
+  return {
+    session_id: state.session_id || sessionId,
+    started_at: state.started_at || sessionStartedAt || new Date().toISOString(),
+    current_editor: {
+      language: state.current_editor?.language || 'html',
+      content: typeof state.current_editor?.content === 'string'
+        ? state.current_editor.content
+        : (codeEditor?.value ?? defaultInterfaceCode),
+      version_id: state.current_editor?.version_id || ''
+    },
+    messages: Array.isArray(state.messages) ? state.messages : [],
+    code_versions: Array.isArray(state.code_versions) ? state.code_versions : [],
+    active_version_index: Number.isFinite(state.active_version_index)
+      ? state.active_version_index
+      : -1
+  };
+}
+
+function persistSessionStateNow() {
+  if (!sessionState || !window.localStorage) {
+    return;
+  }
+  const payload = {
+    schema_version: SESSION_STATE_SCHEMA_VERSION,
+    saved_at: new Date().toISOString(),
+    session_state: sessionState
+  };
+  const key = getSessionStateStorageKey();
+  window.localStorage.setItem(key, JSON.stringify(payload));
+  saveSessionStateToIndexedDb(key, payload);
+}
+
+function scheduleSessionStatePersist() {
+  if (sessionStatePersistTimer) {
+    clearTimeout(sessionStatePersistTimer);
+  }
+  sessionStatePersistTimer = setTimeout(() => {
+    persistSessionStateNow();
+    sessionStatePersistTimer = null;
+  }, SESSION_STATE_PERSIST_DEBOUNCE_MS);
+}
+
+function loadSessionStateFromLocalStorage() {
+  if (!window.localStorage) {
+    return null;
+  }
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(getSessionStateStorageKey()) || 'null');
+    return normalizeSessionState(stored);
+  } catch {
+    return null;
+  }
+}
+
+async function initializeSessionState() {
+  const localState = loadSessionStateFromLocalStorage();
+  if (localState) {
+    sessionState = localState;
+    return;
+  }
+  const indexed = await loadSessionStateFromIndexedDb(getSessionStateStorageKey());
+  const normalized = normalizeSessionState(indexed);
+  if (normalized) {
+    sessionState = normalized;
+    persistSessionStateNow();
+    return;
+  }
+  sessionState = createInitialSessionState();
+  persistSessionStateNow();
+}
+
 function persistVersionStack() {
   if (!window.localStorage) {
     return;
   }
   const key = getVersionStorageKey();
   window.localStorage.setItem(key, JSON.stringify(codeVersionStack));
+}
+
+function normalizeStoredVersion(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  if (typeof entry.content === 'string') {
+    return entry;
+  }
+  if (typeof entry.code === 'string') {
+    return {
+      id: entry.id || generateVersionId(),
+      created_at: entry.createdAt || new Date().toISOString(),
+      source: entry.source || 'user',
+      message_id: entry.message_id || null,
+      language: entry.language || 'html',
+      content: entry.code,
+      diff_from_previous: entry.diff_from_previous || null
+    };
+  }
+  return null;
 }
 
 function loadVersionStack() {
@@ -1208,42 +1391,149 @@ function loadVersionStack() {
     if (!Array.isArray(stored)) {
       return [];
     }
-    return stored.filter((entry) => entry && typeof entry.code === 'string');
+    return stored.map(normalizeStoredVersion).filter(Boolean);
   } catch {
     return [];
   }
 }
 
-function seedVersionStack({ code, source = 'user' }) {
-  const normalizedCode = typeof code === 'string' ? code : '';
-  if (codeVersionStack.length && codeVersionStack.at(-1)?.code === normalizedCode) {
+function setActiveVersionByIndex(index) {
+  if (!sessionState || !Number.isFinite(index)) {
     return;
+  }
+  const version = codeVersionStack[index];
+  if (!version) {
+    return;
+  }
+  sessionState.active_version_index = index;
+  sessionState.current_editor = {
+    language: version.language || 'html',
+    content: version.content,
+    version_id: version.id
+  };
+  scheduleSessionStatePersist();
+}
+
+function upsertMessageEvent({
+  messageId,
+  role,
+  contentText,
+  timestamp,
+  producedCodeVersionId = null
+}) {
+  if (!sessionState || (role !== 'user' && role !== 'assistant')) {
+    return;
+  }
+  const existing = sessionState.messages.find((entry) => entry.id === messageId);
+  const content_blocks = role === 'assistant'
+    ? extractContentBlocks(contentText)
+    : undefined;
+  const next = {
+    id: messageId,
+    role,
+    timestamp: timestamp || new Date().toISOString(),
+    content_text: contentText || '',
+    content_blocks,
+    tokens_estimated: estimateTokensForContent(contentText || ''),
+    produced_code_version_id: producedCodeVersionId || undefined
+  };
+  if (existing) {
+    Object.assign(existing, next);
+  } else {
+    sessionState.messages.push(next);
+  }
+  scheduleSessionStatePersist();
+}
+
+function linkMessageToCodeVersion(messageId, versionId) {
+  if (!sessionState || !messageId || !versionId) {
+    return;
+  }
+  const existing = sessionState.messages.find((entry) => entry.id === messageId);
+  if (existing) {
+    existing.produced_code_version_id = versionId;
+    scheduleSessionStatePersist();
+  }
+}
+
+function addCodeVersion({
+  content,
+  source = 'user',
+  messageId = null,
+  language = 'html'
+}) {
+  const normalizedCode = typeof content === 'string' ? content : '';
+  const lastVersion = codeVersionStack.at(-1);
+  if (lastVersion?.content === normalizedCode) {
+    return lastVersion;
   }
   const version = {
     id: generateVersionId(),
-    sessionId,
-    code: normalizedCode,
-    createdAt: new Date().toISOString(),
-    source
+    created_at: new Date().toISOString(),
+    source,
+    message_id: messageId || undefined,
+    language,
+    content: normalizedCode,
+    diff_from_previous: lastVersion?.content
+      ? simpleLineDiff(lastVersion.content, normalizedCode)
+      : null
   };
   codeVersionStack.push(version);
-  if (codeVersionStack.length > MAX_CODE_HISTORY) {
-    codeVersionStack.splice(0, codeVersionStack.length - MAX_CODE_HISTORY);
+  if (sessionState) {
+    sessionState.code_versions = codeVersionStack;
   }
+  setActiveVersionByIndex(codeVersionStack.length - 1);
   persistVersionStack();
+  if (messageId) {
+    linkMessageToCodeVersion(messageId, version.id);
+  }
+  return version;
+}
+
+function ensureCurrentCodeVersion(source = 'user') {
+  if (!codeEditor) {
+    return;
+  }
+  addCodeVersion({
+    content: codeEditor.value,
+    source
+  });
+}
+
+function scheduleUserCodeVersionSave() {
+  if (!codeEditor) {
+    return;
+  }
+  if (userEditVersionTimer) {
+    clearTimeout(userEditVersionTimer);
+  }
+  userEditVersionTimer = setTimeout(() => {
+    addCodeVersion({
+      content: codeEditor.value,
+      source: 'user'
+    });
+    userEditVersionTimer = null;
+  }, 2000);
 }
 
 function initializeVersionStack() {
   codeVersionStack.length = 0;
-  const stored = loadVersionStack();
+  const stored = sessionState?.code_versions?.length
+    ? sessionState.code_versions
+    : loadVersionStack();
   if (stored.length) {
-    codeVersionStack.push(...stored.slice(-MAX_CODE_HISTORY));
+    codeVersionStack.push(...stored.map(normalizeStoredVersion).filter(Boolean));
   }
-  if (codeEditor) {
-    seedVersionStack({
-      code: codeEditor.value,
+  if (codeEditor && !codeVersionStack.length) {
+    addCodeVersion({
+      content: codeEditor.value,
       source: lastCodeSource === 'llm' ? 'llm' : 'user'
     });
+  }
+  if (sessionState?.active_version_index >= 0) {
+    setActiveVersionByIndex(Math.min(sessionState.active_version_index, codeVersionStack.length - 1));
+  } else if (codeVersionStack.length) {
+    setActiveVersionByIndex(codeVersionStack.length - 1);
   }
   updateRevertButtonState();
 }
@@ -1251,6 +1541,16 @@ function initializeVersionStack() {
 function resetCodeHistory() {
   codeVersionStack.length = 0;
   persistVersionStack();
+  if (sessionState) {
+    sessionState.code_versions = [];
+    sessionState.active_version_index = -1;
+    sessionState.current_editor = {
+      language: 'html',
+      content: codeEditor?.value ?? defaultInterfaceCode,
+      version_id: ''
+    };
+    scheduleSessionStatePersist();
+  }
   updateRevertButtonState();
 }
 
@@ -1268,8 +1568,8 @@ function clearEditorState() {
   lastCodeSource = null;
   userHasEditedCode = false;
   resetCodeHistory();
-  seedVersionStack({
-    code: codeEditor.value,
+  addCodeVersion({
+    content: codeEditor.value,
     source: 'user'
   });
   updateLineNumbers();
@@ -1613,6 +1913,8 @@ function startNewSession() {
   systemPrompt = getSystemPromptForIntent({ type: 'chat' });
   sessionId = startNewSessionId();
   sessionStartedAt = startNewSessionStartedAt();
+  sessionState = createInitialSessionState();
+  persistSessionStateNow();
   resetSessionStats();
   chatAbortController = null;
   chatAbortSilent = false;
@@ -2327,6 +2629,10 @@ function applyArtifactToEditor(artifact) {
   lastLLMCode = artifact.code.content;
   userHasEditedCode = false;
   resetCodeHistory();
+  addCodeVersion({
+    content: artifact.code.content,
+    source: 'system'
+  });
   lastCodeSource = 'artifact';
   activeArtifactId = artifact.artifact_id || null;
   updateRunButtonVisibility();
@@ -4644,6 +4950,9 @@ function getMessageRole(messageEl) {
 }
 
 function getChatExportMessages() {
+  if (sessionState?.messages?.length) {
+    return sessionState.messages;
+  }
   if (!chatMessages) {
     return [];
   }
@@ -4662,9 +4971,11 @@ function getChatExportMessages() {
       const content = getMessageCopyText(messageEl);
       const timestamp = messageEl.dataset.timestamp || new Date().toISOString();
       return {
+        id: messageEl.dataset.id || generateMessageId(),
         role: getMessageRole(messageEl),
         timestamp,
-        content,
+        content_text: content,
+        content_blocks: getMessageRole(messageEl) === 'assistant' ? extractContentBlocks(content) : undefined,
         tokens_estimated: estimateTokensForContent(content)
       };
     });
@@ -4672,9 +4983,12 @@ function getChatExportMessages() {
 
 function buildChatExportPayload(summary) {
   const now = new Date();
-  const creditState = getCreditState();
+  const artifactContext = activeArtifactId ? findArtifactInState(activeArtifactId) : null;
+  const activeVersionId = sessionState?.current_editor?.version_id
+    || sessionState?.code_versions?.at(-1)?.id
+    || '';
   return {
-    schema_version: '1.1',
+    schema_version: SESSION_STATE_SCHEMA_VERSION,
     app: 'maya-dev-ui',
     saved_at: now.toISOString(),
     user_id: getUserContext().id || '',
@@ -4692,13 +5006,15 @@ function buildChatExportPayload(summary) {
       }
       : null,
     messages: getChatExportMessages(),
-    editor: {
-      language: 'html',
-      content: codeEditor?.value ?? ''
+    code_versions: sessionState?.code_versions || [],
+    editor_state: {
+      active_version_id: activeVersionId
     },
     metadata: {
       model: DEFAULT_MODEL,
-      credits_used_estimate: creditState.todayCreditsUsed ?? 0
+      plan: currentUser?.plan || currentUser?.planTier || '',
+      visibility: artifactContext?.visibility || 'private',
+      forked_from: artifactContext?.source_artifact_id || null
     }
   };
 }
@@ -5239,8 +5555,8 @@ let loadingInterval = null;
 let isGenerating = false;
 let isPaywallVisible = false;
 let lastLLMCode = null;
-const MAX_CODE_HISTORY = 20;
 const codeVersionStack = [];
+let userEditVersionTimer = null;
 let userHasEditedCode = false;
 let baseExecutionWarnings = [];
 let sandboxMode = 'finite';
@@ -5570,7 +5886,7 @@ function addMessage(role, html, options = {}) {
     message.dataset.pending = 'true';
   }
 
-  const id = crypto.randomUUID();
+  const id = generateMessageId();
   message.dataset.id = id;
 
   chatMessages.appendChild(message);
@@ -5633,16 +5949,57 @@ function getMessageCopyText(messageEl) {
   return clone.innerText.replace(/✓|📋/g, '').trim();
 }
 
+function extractContentBlocks(contentText) {
+  if (typeof contentText !== 'string' || !contentText.trim()) {
+    return [];
+  }
+  const blocks = [];
+  const regex = /```([a-z0-9_-]+)?\n([\s\S]*?)```/gi;
+  let lastIndex = 0;
+  let match = null;
+  while ((match = regex.exec(contentText))) {
+    if (match.index > lastIndex) {
+      const text = contentText.slice(lastIndex, match.index);
+      if (text) {
+        blocks.push({ type: 'text', content: text });
+      }
+    }
+    blocks.push({
+      type: 'code',
+      language: match[1] || undefined,
+      content: match[2] || ''
+    });
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < contentText.length) {
+    const text = contentText.slice(lastIndex);
+    if (text) {
+      blocks.push({ type: 'text', content: text });
+    }
+  }
+  return blocks;
+}
+
 function appendMessage(role, content, options = {}) {
   const message = document.createElement('div');
   message.className = `message ${role}${options.className ? ` ${options.className}` : ''}`;
   message.textContent = content;
   stampMessage(message, role);
+  const messageId = generateMessageId();
+  message.dataset.id = messageId;
   chatMessages.appendChild(message);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   updateClearChatButtonState();
   if (role === 'user') {
     attachCopyButton(message, () => content);
+  }
+  if (role === 'user' || role === 'assistant') {
+    upsertMessageEvent({
+      messageId,
+      role,
+      contentText: content,
+      timestamp: message.dataset.timestamp
+    });
   }
   return message;
 }
@@ -5812,6 +6169,17 @@ function renderAssistantMessage(messageId, text, metadataParts = []) {
 
   if (messageEl) {
     attachCopyButton(messageEl, () => getMessageCopyText(messageEl));
+  }
+  if (messageEl) {
+    const messageId = messageEl.dataset.id || messageId;
+    if (messageId) {
+      upsertMessageEvent({
+        messageId,
+        role: 'assistant',
+        contentText: safeText,
+        timestamp: messageEl.dataset.timestamp
+      });
+    }
   }
   return messageEl;
 }
@@ -6433,28 +6801,23 @@ function updatePromoteVisibility() {
     userHasEditedCode && isRunning ? 'inline-flex' : 'none';
 }
 
-function applyLLMEdit(newCode) {
+function applyLLMEdit(newCode, { messageId = null } = {}) {
   if (!codeEditor) {
     return;
   }
-  const previousCode = codeEditor.value;
-  if (typeof previousCode === 'string') {
-    seedVersionStack({
-      code: previousCode,
-      source: lastCodeSource === 'llm' ? 'llm' : 'user'
-    });
-  }
-  seedVersionStack({
-    code: newCode,
-    source: 'llm'
+  ensureCurrentCodeVersion(lastCodeSource === 'llm' ? 'llm' : 'user');
+  addCodeVersion({
+    content: newCode,
+    source: 'llm',
+    messageId
   });
   codeEditor.value = newCode;
   updateRevertButtonState();
 }
 
-function setCodeFromLLM(code) {
+function setCodeFromLLM(code, messageId = null) {
   lastLLMCode = code;
-  applyLLMEdit(code);
+  applyLLMEdit(code, { messageId });
   baselineCode = code;
   userHasEditedCode = false;
   lastCodeSource = 'llm';
@@ -6467,6 +6830,10 @@ function setCodeFromLLM(code) {
 }
 
 function handleUserRun(code, source = 'user', statusMessage = 'Applying your edits…') {
+  addCodeVersion({
+    content: code,
+    source: source === 'user' ? 'user' : 'system'
+  });
   currentCode = code;
   baselineCode = code;
   userHasEditedCode = false;
@@ -6833,7 +7200,7 @@ async function sendChat() {
   try {
     if (hasCode) {
       currentCode = extractedCode;
-      setCodeFromLLM(extractedCode);
+      setCodeFromLLM(extractedCode, pendingMessageId);
       pendingAssistantProposal = null;
       runWhenPreviewReady(() => {
         handleLLMOutput(extractedCode, 'generated').catch((error) => {
@@ -7598,6 +7965,7 @@ codeEditor.addEventListener('input', () => {
   if (hasEdits) {
     markPreviewStale();
   }
+  scheduleUserCodeVersionSave();
   resetExecutionPreparation();
   updateLineNumbers();
   updateSaveCodeButtonState();
@@ -7615,7 +7983,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bootstrapApp();
 });
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   if (!runButton) {
     console.warn('⚠️ Run Code button not found');
     return;
@@ -7623,6 +7991,13 @@ document.addEventListener('DOMContentLoaded', () => {
   updateRunButtonVisibility();
   updateRollbackVisibility();
   updatePromoteVisibility();
+  await initializeSessionState();
+  if (sessionState?.current_editor?.content && codeEditor) {
+    codeEditor.value = sessionState.current_editor.content;
+    baselineCode = codeEditor.value;
+    currentCode = codeEditor.value;
+    updateLineNumbers();
+  }
   initializeVersionStack();
   updateSaveCodeButtonState();
   console.log('✅ Run Code listener attached');
@@ -7644,10 +8019,11 @@ document.addEventListener('DOMContentLoaded', () => {
       persistVersionStack();
       const previousVersion = codeVersionStack.at(-1);
       updateRevertButtonState();
-      if (!previousVersion || typeof previousVersion.code !== 'string') {
+      if (!previousVersion || typeof previousVersion.content !== 'string') {
         return;
       }
-      codeEditor.value = previousVersion.code;
+      codeEditor.value = previousVersion.content;
+      setActiveVersionByIndex(codeVersionStack.length - 1);
       userHasEditedCode = codeEditor.value !== baselineCode;
       lastCodeSource = previousVersion.source === 'llm' ? 'llm' : 'user';
       updateRunButtonVisibility();
