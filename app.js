@@ -2594,7 +2594,7 @@ function updateSaveCodeButtonState() {
     return;
   }
   const hasContent = Boolean(codeEditor.value.trim());
-  saveCodeButton.disabled = !hasContent || saveArtifactInProgress;
+  saveCodeButton.disabled = !hasContent;
 }
 
 function lockEditor() {
@@ -3151,14 +3151,14 @@ async function inferArtifactMetadata({ messages, code }) {
     return {
       ok: true,
       title: data?.title || 'Untitled artifact',
-      description: data?.description || 'Description unavailable.'
+      description: data?.description || ''
     };
   } catch (error) {
     console.warn('Metadata inference failed.', error);
     return {
       ok: false,
       title: 'Untitled artifact',
-      description: 'Description unavailable.'
+      description: ''
     };
   }
 }
@@ -3323,11 +3323,12 @@ function openArtifactVersionsModal(artifactId) {
   });
 }
 
-function openArtifactModal({ title, description, screenshotDataUrl, onConfirm, onCancel }) {
+function openArtifactModal({ title, description, codePreview, onConfirm, onCancel }) {
+  const previewContent = escapeHtml(codePreview || '');
   const html = `
     <h2>Save code artifact</h2>
     <p>Review the inferred details before saving this artifact.</p>
-    ${screenshotDataUrl ? `<img class="artifact-modal-preview" src="${screenshotDataUrl}" alt="Artifact preview" />` : ''}
+    <pre class="artifact-modal-code-preview"><code>${previewContent}</code></pre>
     <label class="modal-field">
       <span>Title</span>
       <input id="artifactTitleInput" type="text" value="${title.replace(/"/g, '&quot;')}" />
@@ -3382,69 +3383,62 @@ async function handleSaveCodeArtifact() {
   lockChat();
   lockEditor();
 
-  let screenshotDataUrl = '';
-  try {
-    screenshotDataUrl = await captureArtifactScreenshot();
-  } catch (error) {
-    console.warn('Screenshot capture failed.', error);
-  }
-
   const chat = getChatExportMessages().map((entry) => ({
     role: entry.role,
     content: entry.content
   }));
+  const codeVersions = await loadArtifactCodeVersions();
+  const activeVersionId = sessionState?.current_editor?.version_id
+    || codeVersions.at(-1)?.id
+    || '';
+  const activeCodeVersion = codeVersions.find((version) => version?.id === activeVersionId);
+  const resolvedLanguage = activeCodeVersion?.language || 'html';
+  const resolvedContent = (activeCodeVersion?.content || '').trim() || content;
   let metadata = { title: 'Untitled artifact', description: '' };
   try {
     startLoading('Inferring details…');
     metadata = await inferArtifactMetadata({
       messages: chat,
       code: {
-        language: 'html',
-        content
+        language: resolvedLanguage,
+        content: resolvedContent
       }
     });
   } finally {
     stopLoading();
   }
   if (!metadata.ok) {
-    showToast('Metadata inference failed. Please try again.');
-    saveArtifactInProgress = false;
-    updateSaveCodeButtonState();
-    unlockChat();
-    unlockEditor();
-    return;
+    showToast('Metadata inference failed. You can still save.', { variant: 'warning', duration: 2500 });
   }
-
-  const codeVersions = await loadArtifactCodeVersions();
 
   openArtifactModal({
     title: metadata.title,
     description: metadata.description,
-    screenshotDataUrl,
+    codePreview: resolvedContent,
     onConfirm: async ({ title, description, visibility }) => {
       try {
-        if (!title.trim()) {
-          showToast('Title is required.');
-          return;
-        }
-        if (!description.trim()) {
-          showToast('Description is required.');
-          return;
-        }
+        const normalizedTitle = title.trim() || 'Untitled artifact';
+        const normalizedDescription = description.trim();
         const payload = {
           session_id: sessionId,
-          title,
-          description,
+          title: normalizedTitle,
+          description: normalizedDescription,
           visibility,
-          code: { language: 'html', content },
+          code: { language: resolvedLanguage, content: resolvedContent },
           artifact: {
-            code_version_id: sessionState?.current_editor?.version_id || '',
-            language: 'html',
-            content
+            code_version_id: activeVersionId,
+            language: resolvedLanguage,
+            content: resolvedContent
           },
-          screenshot_data_url: screenshotDataUrl,
           chat,
           code_versions: codeVersions,
+          snapshot: {
+            tokens: {
+              input: sessionStats.tokensIn,
+              output: sessionStats.tokensOut
+            },
+            model: sessionState?.model || DEFAULT_MODEL
+          },
           source_session: {
             session_id: sessionId,
             credits_used_estimate: sessionStats.creditsUsedEstimate || 0

@@ -3059,6 +3059,21 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.artifact-modal-code-preview {
+  margin: 12px 0 0;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(15, 18, 24, 0.8);
+  color: #d7deea;
+  font-family: 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+}
+
 .artifact-version-list {
   display: flex;
   flex-direction: column;
