@@ -3139,7 +3139,6 @@ async function inferArtifactMetadata({ messages, code }) {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        session_id: sessionId,
         messages,
         code
       })
@@ -3147,17 +3146,17 @@ async function inferArtifactMetadata({ messages, code }) {
     if (!res.ok) {
       throw new Error('Metadata inference failed');
     }
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     return {
       ok: true,
-      title: data?.title || 'Untitled artifact',
-      description: data?.description || ''
+      title: typeof data?.title === 'string' ? data.title : '',
+      description: typeof data?.description === 'string' ? data.description : ''
     };
   } catch (error) {
     console.warn('Metadata inference failed.', error);
     return {
       ok: false,
-      title: 'Untitled artifact',
+      title: '',
       description: ''
     };
   }
@@ -3327,7 +3326,7 @@ function openArtifactModal({ title, description, codePreview, onConfirm, onCance
   const previewContent = escapeHtml(codePreview || '');
   const html = `
     <h2>Save code artifact</h2>
-    <p>Review the inferred details before saving this artifact.</p>
+    <p>Add details before saving this artifact.</p>
     <pre class="artifact-modal-code-preview"><code>${previewContent}</code></pre>
     <label class="modal-field">
       <span>Title</span>
@@ -3394,26 +3393,9 @@ async function handleSaveCodeArtifact() {
   const activeCodeVersion = codeVersions.find((version) => version?.id === activeVersionId);
   const resolvedLanguage = activeCodeVersion?.language || 'html';
   const resolvedContent = (activeCodeVersion?.content || '').trim() || content;
-  let metadata = { title: 'Untitled artifact', description: '' };
-  try {
-    startLoading('Inferring details…');
-    metadata = await inferArtifactMetadata({
-      messages: chat,
-      code: {
-        language: resolvedLanguage,
-        content: resolvedContent
-      }
-    });
-  } finally {
-    stopLoading();
-  }
-  if (!metadata.ok) {
-    showToast('Metadata inference failed. You can still save.', { variant: 'warning', duration: 2500 });
-  }
-
   openArtifactModal({
-    title: metadata.title,
-    description: metadata.description,
+    title: '',
+    description: '',
     codePreview: resolvedContent,
     onConfirm: async ({ title, description, visibility }) => {
       try {
@@ -3472,6 +3454,25 @@ async function handleSaveCodeArtifact() {
       unlockEditor();
     }
   });
+
+  const metadata = await inferArtifactMetadata({
+    messages: chat,
+    code: {
+      language: resolvedLanguage,
+      content: resolvedContent
+    }
+  });
+  if (!metadata.ok) {
+    showToast('Couldn’t infer metadata. You can still save.', { variant: 'warning', duration: 2500 });
+  }
+  const titleInput = document.getElementById('artifactTitleInput');
+  const descriptionInput = document.getElementById('artifactDescriptionInput');
+  if (titleInput) {
+    titleInput.value ||= metadata.title;
+  }
+  if (descriptionInput) {
+    descriptionInput.value ||= metadata.description;
+  }
 }
 
 function findArtifactInState(id) {
