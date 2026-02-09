@@ -3,31 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <title>PDCo Dev Studio</title>
+
   <link rel="stylesheet" href="styles.css" />
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/editor/editor.main.css"
-  />
-<!-- Monaco AMD loader -->
-<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/loader.js"></script>
 
-<script>
-  require.config({
-    paths: {
-      vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs"
-    }
-  });
+  <!-- Monaco AMD loader (ONLY this, once) -->
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/loader.js"></script>
 
-  require(["vs/editor/editor.main"], function () {
-    monaco.editor.create(document.getElementById("editor"), {
-      value: "// hello",
-      language: "javascript",
-      theme: "vs-dark"
+  <script>
+    window.__monacoReady = false;
+
+    require.config({
+      paths: {
+        vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs"
+      }
     });
-  });
-</script>
 
+    require(["vs/editor/editor.main"], function () {
+      window.__monacoReady = true;
+    });
+  </script>
 </head>
+
+  
 <body>
   <div id="modal-root" class="modal-root hidden" role="dialog" aria-modal="true" aria-hidden="true"></div>
   <div
