@@ -51,17 +51,34 @@ If you host the UI on a static site, keep the API key on the server (for example
 
 - [Glyph schema v1](docs/glyph-schema.md)
 - [User storage schema](data/USERS_SCHEMA.md)
+- [Artifact + profile storage schema](data/ARTIFACTS_SCHEMA.md)
 
 ## User storage migration
 
 User accounts, billing, and credits are stored in Postgres. To bootstrap a new database:
 
 1. Apply `data/migrations/001_create_user_storage.sql`.
-2. (Optional) Import legacy CSV users:
+2. Apply `data/migrations/002_create_artifacts_profiles.sql`.
+3. (Optional) Import legacy CSV users:
 
    ```bash
    node scripts/import-users.js
    ```
+
+## Object storage configuration
+
+Artifact screenshots and profile avatars can be stored in local disk (default) or S3-compatible storage.
+
+Set the following environment variables to enable object storage:
+
+- `OBJECT_STORAGE_DRIVER`: `local` (default) or `s3`.
+- `OBJECT_STORAGE_BUCKET`: Bucket name.
+- `OBJECT_STORAGE_REGION`: Region (default: `us-east-1`).
+- `OBJECT_STORAGE_ENDPOINT`: Optional custom endpoint for R2/GCS/S3-compatible storage.
+- `OBJECT_STORAGE_ACCESS_KEY_ID`: Access key.
+- `OBJECT_STORAGE_SECRET_ACCESS_KEY`: Secret key.
+- `OBJECT_STORAGE_FORCE_PATH_STYLE`: `true` for path-style URLs when required.
+- `OBJECT_STORAGE_PUBLIC_URL`: Optional public base URL used in returned media URLs.
 
 ## Next steps
 

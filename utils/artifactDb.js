@@ -1,0 +1,529 @@
+import crypto from 'node:crypto';
+import { getUsageAnalyticsPool } from './usageAnalytics.js';
+
+function getArtifactsDbPool() {
+  const pool = getUsageAnalyticsPool();
+  if (!pool) {
+    throw new Error('DATABASE_URL is required for artifact storage.');
+  }
+  return pool;
+}
+
+function toIsoString(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (value instanceof Date) return value.toISOString();
+  return new Date(value).toISOString();
+}
+
+export function mapArtifactRow(row) {
+  if (!row) return null;
+  return {
+    artifact_id: row.id,
+    owner_user_id: row.owner_user_id,
+    visibility: row.visibility,
+    created_at: toIsoString(row.created_at),
+    updated_at: toIsoString(row.updated_at),
+    title: row.title || '',
+    description: row.description || '',
+    code: {
+      language: row.code_language || 'html',
+      content: row.code_content || ''
+    },
+    screenshot_url: row.screenshot_url || '',
+    derived_from: {
+      artifact_id: row.forked_from_id || null,
+      owner_user_id: row.forked_from_owner_user_id || null,
+      version_id: row.forked_from_version_id || null,
+      version_label: row.forked_from_version_label || null
+    },
+    source_session: row.source_session || { session_id: '', credits_used_estimate: 0 },
+    current_version_id: row.artifact_current_version_id || null,
+    versioning: {
+      enabled: Boolean(row.versioning_enabled),
+      chat_history_public: Boolean(row.chat_history_public)
+    },
+    stats: {
+      forks: Number(row.forks_count || 0),
+      imports: Number(row.imports_count || 0),
+      likes: Number(row.likes_count || 0),
+      comments: Number(row.comments_count || 0)
+    }
+  };
+}
+
+export function mapArtifactVersionRow(row) {
+  if (!row) return null;
+  return {
+    version_id: row.id,
+    artifact_id: row.artifact_id,
+    session_id: row.session_id || '',
+    created_at: toIsoString(row.created_at),
+    label: row.label || null,
+    summary: row.summary || null,
+    version_index: Number(row.version_index || 0),
+    code: {
+      language: row.code_language || 'html',
+      content: row.code_content || ''
+    },
+    code_versions: row.code_versions || null,
+    chat: row.chat || { included: false, messages: null },
+    stats: row.stats || {}
+  };
+}
+
+async function fetchArtifactRows({ whereClause = '', params = [] } = {}) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `SELECT
+      a.id,
+      a.owner_user_id,
+      a.visibility,
+      a.created_at,
+      a.updated_at,
+      a.title,
+      a.description,
+      a.current_version_id AS artifact_current_version_id,
+      a.forked_from_id,
+      a.forked_from_owner_user_id,
+      a.forked_from_version_id,
+      a.forked_from_version_label,
+      a.forks_count,
+      a.imports_count,
+      a.likes_count,
+      a.comments_count,
+      a.versioning_enabled,
+      a.chat_history_public,
+      a.source_session,
+      m.screenshot_url,
+      m.thumb_url,
+      v.id AS version_id,
+      v.code_language,
+      v.code_content,
+      v.code_versions,
+      v.chat,
+      v.stats
+     FROM artifacts a
+     LEFT JOIN artifact_media m ON m.artifact_id = a.id
+     LEFT JOIN artifact_versions v ON v.id = a.current_version_id
+     ${whereClause}`,
+    params
+  );
+  return result.rows || [];
+}
+
+export async function fetchArtifactById(artifactId) {
+  const rows = await fetchArtifactRows({
+    whereClause: 'WHERE a.id = $1',
+    params: [artifactId]
+  });
+  return mapArtifactRow(rows[0]);
+}
+
+export async function fetchArtifactsByOwner(ownerUserId) {
+  const rows = await fetchArtifactRows({
+    whereClause: 'WHERE a.owner_user_id = $1 ORDER BY a.updated_at DESC',
+    params: [ownerUserId]
+  });
+  return rows.map(mapArtifactRow);
+}
+
+export async function fetchPublicArtifacts() {
+  const rows = await fetchArtifactRows({
+    whereClause: "WHERE a.visibility = 'public' ORDER BY a.updated_at DESC"
+  });
+  return rows.map(mapArtifactRow);
+}
+
+export async function fetchArtifactVersions(artifactId) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `SELECT *
+     FROM artifact_versions
+     WHERE artifact_id = $1
+     ORDER BY version_index ASC`,
+    [artifactId]
+  );
+  return result.rows.map(mapArtifactVersionRow);
+}
+
+export async function fetchArtifactVersionById(artifactId, versionId) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `SELECT *
+     FROM artifact_versions
+     WHERE artifact_id = $1 AND id = $2
+     LIMIT 1`,
+    [artifactId, versionId]
+  );
+  return mapArtifactVersionRow(result.rows[0]);
+}
+
+export async function createArtifact({
+  artifactId: providedArtifactId,
+  ownerUserId,
+  title,
+  description,
+  visibility,
+  code,
+  codeVersions,
+  chat,
+  sourceSession,
+  derivedFrom,
+  screenshotUrl
+}) {
+  const pool = getArtifactsDbPool();
+  const client = await pool.connect();
+  const artifactId = providedArtifactId || crypto.randomUUID();
+  const versionId = crypto.randomUUID();
+  const now = new Date();
+  const versionIndex = 1;
+  const codeBlobRef = `inline:${versionId}`;
+  const stats = {
+    turns: Array.isArray(chat) ? chat.length : 0,
+    credits_used_estimate: Number(sourceSession?.credits_used_estimate || 0) || 0
+  };
+
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO artifacts
+        (id, owner_user_id, title, description, visibility, created_at, updated_at,
+         forked_from_id, forked_from_owner_user_id, forked_from_version_id, forked_from_version_label,
+         current_version_id, versioning_enabled, chat_history_public, source_session)
+       VALUES
+        ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11, false, false, $12)`,
+      [
+        artifactId,
+        ownerUserId,
+        title,
+        description,
+        visibility,
+        now,
+        derivedFrom?.artifact_id || null,
+        derivedFrom?.owner_user_id || null,
+        derivedFrom?.version_id || null,
+        derivedFrom?.version_label || null,
+        versionId,
+        sourceSession || null
+      ]
+    );
+    await client.query(
+      `INSERT INTO artifact_versions
+        (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
+         code_language, code_content, code_versions, chat, stats)
+       VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        versionId,
+        artifactId,
+        versionIndex,
+        codeBlobRef,
+        now,
+        null,
+        null,
+        String(sourceSession?.session_id || ''),
+        code.language || 'html',
+        code.content || '',
+        codeVersions || null,
+        chat
+          ? { included: true, messages: chat }
+          : { included: false, messages: null },
+        stats
+      ]
+    );
+    if (screenshotUrl) {
+      await client.query(
+        `INSERT INTO artifact_media (artifact_id, screenshot_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $3)
+         ON CONFLICT (artifact_id)
+         DO UPDATE SET screenshot_url = EXCLUDED.screenshot_url, updated_at = EXCLUDED.updated_at`,
+        [artifactId, screenshotUrl, now]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return {
+    artifactId,
+    versionId
+  };
+}
+
+export async function createArtifactVersion({
+  artifactId,
+  ownerUserId,
+  code,
+  codeVersions,
+  chat,
+  sourceSession,
+  label,
+  visibility,
+  title,
+  description,
+  screenshotUrl
+}) {
+  const pool = getArtifactsDbPool();
+  const client = await pool.connect();
+  const versionId = crypto.randomUUID();
+  const now = new Date();
+  const codeBlobRef = `inline:${versionId}`;
+  const stats = {
+    turns: Array.isArray(chat) ? chat.length : 0,
+    credits_used_estimate: Number(sourceSession?.credits_used_estimate || 0) || 0
+  };
+
+  try {
+    await client.query('BEGIN');
+    const maxResult = await client.query(
+      `SELECT COALESCE(MAX(version_index), 0) AS max_index
+       FROM artifact_versions
+       WHERE artifact_id = $1`,
+      [artifactId]
+    );
+    const nextIndex = Number(maxResult.rows[0]?.max_index || 0) + 1;
+    await client.query(
+      `INSERT INTO artifact_versions
+        (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
+         code_language, code_content, code_versions, chat, stats)
+       VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        versionId,
+        artifactId,
+        nextIndex,
+        codeBlobRef,
+        now,
+        null,
+        label || null,
+        String(sourceSession?.session_id || ''),
+        code.language || 'html',
+        code.content || '',
+        codeVersions || null,
+        chat
+          ? { included: true, messages: chat }
+          : { included: false, messages: null },
+        stats
+      ]
+    );
+    await client.query(
+      `UPDATE artifacts
+       SET current_version_id = $1,
+           updated_at = $2,
+           visibility = $3,
+           title = CASE WHEN $4 THEN title ELSE $5 END,
+           description = CASE WHEN $4 THEN description ELSE $6 END
+       WHERE id = $7 AND owner_user_id = $8`,
+      [
+        versionId,
+        now,
+        visibility,
+        visibility === 'public',
+        title,
+        description,
+        artifactId,
+        ownerUserId
+      ]
+    );
+    if (screenshotUrl) {
+      await client.query(
+        `INSERT INTO artifact_media (artifact_id, screenshot_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $3)
+         ON CONFLICT (artifact_id)
+         DO UPDATE SET screenshot_url = EXCLUDED.screenshot_url, updated_at = EXCLUDED.updated_at`,
+        [artifactId, screenshotUrl, now]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return versionId;
+}
+
+export async function updateArtifactPublishSettings({ artifactId, ownerUserId, enabled, chatHistoryPublic }) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `UPDATE artifacts
+     SET versioning_enabled = $1,
+         chat_history_public = $2,
+         updated_at = NOW()
+     WHERE id = $3 AND owner_user_id = $4
+     RETURNING id`,
+    [enabled, enabled ? chatHistoryPublic : false, artifactId, ownerUserId]
+  );
+  return result.rowCount > 0;
+}
+
+export async function updateArtifactVisibility({ artifactId, ownerUserId, visibility }) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `UPDATE artifacts
+     SET visibility = $1,
+         updated_at = NOW()
+     WHERE id = $2 AND owner_user_id = $3
+     RETURNING id`,
+    [visibility, artifactId, ownerUserId]
+  );
+  return result.rowCount > 0;
+}
+
+export async function updateArtifactMetadata({ artifactId, ownerUserId, title, description }) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `UPDATE artifacts
+     SET title = $1,
+         description = $2,
+         updated_at = NOW()
+     WHERE id = $3 AND owner_user_id = $4
+     RETURNING id`,
+    [title, description, artifactId, ownerUserId]
+  );
+  return result.rowCount > 0;
+}
+
+export async function deleteArtifact({ artifactId, ownerUserId }) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `DELETE FROM artifacts
+     WHERE id = $1 AND owner_user_id = $2`,
+    [artifactId, ownerUserId]
+  );
+  return result.rowCount > 0;
+}
+
+export async function forkArtifact({
+  sourceArtifactId,
+  ownerUserId,
+  sessionId,
+  creditsUsedEstimate,
+  requestedVersionId
+}) {
+  const pool = getArtifactsDbPool();
+  const client = await pool.connect();
+  const newId = crypto.randomUUID();
+  const versionId = crypto.randomUUID();
+  const now = new Date();
+  const codeBlobRef = `inline:${versionId}`;
+
+  try {
+    await client.query('BEGIN');
+    const sourceResult = await client.query(
+      `SELECT
+        a.id,
+        a.owner_user_id,
+        a.title,
+        a.description,
+        a.visibility,
+        a.current_version_id,
+        m.screenshot_url
+       FROM artifacts a
+       LEFT JOIN artifact_media m ON m.artifact_id = a.id
+       WHERE a.id = $1
+       FOR UPDATE`,
+      [sourceArtifactId]
+    );
+    const source = sourceResult.rows[0];
+    if (!source) {
+      throw new Error('Artifact not found');
+    }
+    const versionResult = await client.query(
+      `SELECT *
+       FROM artifact_versions
+       WHERE artifact_id = $1
+       ORDER BY version_index ASC`,
+      [sourceArtifactId]
+    );
+    const versions = versionResult.rows;
+    const resolvedVersion = versions.find((version) => version.id === requestedVersionId)
+      || versions.find((version) => version.id === source.current_version_id)
+      || versions[versions.length - 1];
+    const versionNumber = resolvedVersion
+      ? versions.findIndex((version) => version.id === resolvedVersion.id) + 1
+      : null;
+    const stats = {
+      turns: 0,
+      credits_used_estimate: Number(creditsUsedEstimate || 0) || 0
+    };
+
+    await client.query(
+      `INSERT INTO artifacts
+        (id, owner_user_id, title, description, visibility, created_at, updated_at,
+         forked_from_id, forked_from_owner_user_id, forked_from_version_id, forked_from_version_label,
+         current_version_id, versioning_enabled, chat_history_public, source_session)
+       VALUES
+        ($1, $2, $3, $4, 'private', $5, $5, $6, $7, $8, $9, $10, false, false, $11)`,
+      [
+        newId,
+        ownerUserId,
+        `Fork of ${source.title || 'artifact'}`,
+        source.description || '',
+        now,
+        source.id,
+        source.owner_user_id,
+        resolvedVersion?.id || null,
+        versionNumber ? `v${versionNumber}` : null,
+        versionId,
+        { session_id: String(sessionId || ''), credits_used_estimate: stats.credits_used_estimate }
+      ]
+    );
+    await client.query(
+      `INSERT INTO artifact_versions
+        (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
+         code_language, code_content, code_versions, chat, stats)
+       VALUES
+        ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        versionId,
+        newId,
+        codeBlobRef,
+        now,
+        null,
+        null,
+        String(sessionId || ''),
+        resolvedVersion?.code_language || 'html',
+        resolvedVersion?.code_content || '',
+        resolvedVersion?.code_versions || null,
+        { included: false, messages: null },
+        stats
+      ]
+    );
+    if (source.screenshot_url) {
+      await client.query(
+        `INSERT INTO artifact_media (artifact_id, screenshot_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $3)
+         ON CONFLICT (artifact_id)
+         DO UPDATE SET screenshot_url = EXCLUDED.screenshot_url, updated_at = EXCLUDED.updated_at`,
+        [newId, source.screenshot_url, now]
+      );
+    }
+    await client.query(
+      `UPDATE artifacts
+       SET forks_count = forks_count + 1,
+           imports_count = imports_count + 1,
+           updated_at = $1
+       WHERE id = $2`,
+      [now, sourceArtifactId]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return {
+    artifactId: newId,
+    versionId
+  };
+}
