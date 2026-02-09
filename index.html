@@ -21,6 +21,24 @@
     require(["vs/editor/editor.main"], function () {
       window.__monacoReady = true;
     });
+  document.addEventListener("DOMContentLoaded", () => {
+  console.log("DOM loaded");
+  console.log("Monaco ready:", window.__monacoReady);
+
+  const el = document.getElementById("editor");
+  console.log("Editor element:", el);
+
+  if (!window.__monacoReady || !el) return;
+
+  monaco.editor.create(el, {
+    value: "// hello",
+    language: "javascript",
+    theme: "vs-dark"
+  });
+
+  console.log("Editor created");
+});
+
   </script>
 </head>
   
