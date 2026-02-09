@@ -58,6 +58,8 @@ const DATA_DIR = path.join(__dirname, 'data');
 const ARTIFACTS_FILE = path.join(DATA_DIR, 'artifacts.json');
 const ARTIFACT_VERSIONS_FILE = path.join(DATA_DIR, 'artifact_versions.json');
 const ARTIFACT_UPLOADS_DIR = path.join(DATA_DIR, 'artifact_uploads');
+const PROFILE_UPLOADS_DIR = path.join(DATA_DIR, 'profile_uploads');
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
 const ARTIFACT_EVENTS_FILE = path.join(DATA_DIR, 'artifact_events.csv');
 
 const CHAT_SYSTEM_PROMPT = `You are an assistant embedded in a live coding UI.
@@ -100,6 +102,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/uploads/artifacts', express.static(ARTIFACT_UPLOADS_DIR));
+app.use('/uploads/profiles', express.static(PROFILE_UPLOADS_DIR));
 
 /**
  * 🔍 DIAGNOSTIC HEADERS (prove code is live)
@@ -256,6 +259,20 @@ app.post('/api/artifacts', async (req, res) => {
       return res.status(404).json({ ok: false, error: 'User not found' });
     }
 
+    const validation = validateArtifactPayload({
+      title: req.body?.title,
+      description: req.body?.description,
+      code: req.body?.code,
+      screenshotDataUrl: req.body?.screenshot_data_url
+    });
+    if (!validation.ok) {
+      console.error('Artifact payload rejected.', {
+        userId: user.user_id,
+        reasons: validation.errors
+      });
+      return res.status(400).json({ ok: false, error: validation.errors.join(' ') });
+    }
+
     const now = new Date().toISOString();
     const artifactId = crypto.randomUUID();
     const visibility = req.body?.visibility === 'public' ? 'public' : 'private';
@@ -360,6 +377,20 @@ app.post('/api/artifacts/:id/versions', async (req, res) => {
     if (artifact.owner_user_id !== session.sub) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
+    const validation = validateArtifactPayload({
+      title: req.body?.title ?? artifact.title,
+      description: req.body?.description ?? artifact.description,
+      code: req.body?.code || artifact.code,
+      screenshotDataUrl: req.body?.screenshot_data_url
+    });
+    if (!validation.ok) {
+      console.error('Artifact version payload rejected.', {
+        userId: artifact.owner_user_id,
+        artifactId: artifact.artifact_id,
+        reasons: validation.errors
+      });
+      return res.status(400).json({ ok: false, error: validation.errors.join(' ') });
+    }
     const now = new Date().toISOString();
     const code = req.body?.code || artifact.code;
     const chat = Array.isArray(req.body?.chat) ? req.body.chat : null;
@@ -437,6 +468,111 @@ app.get('/api/artifacts/:id/versions', async (req, res) => {
   } catch (error) {
     console.error('Failed to load artifact versions.', error);
     return res.status(500).json({ ok: false, error: 'Failed to load artifact versions' });
+  }
+});
+
+app.get('/api/profile', async (req, res) => {
+  try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+    const user = await getUserById(session.sub);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    const profiles = await loadProfiles();
+    const profile = profiles.find((entry) => entry.user_id === user.user_id);
+    if (!profile) {
+      return res.status(404).json({ ok: false, error: 'Profile not found' });
+    }
+    const stats = await buildProfileStats(user.user_id);
+    return res.json({ ok: true, profile: mapProfileForClient(profile, user, stats) });
+  } catch (error) {
+    console.error('Failed to load profile.', error);
+    return res.status(500).json({ ok: false, error: 'Failed to load profile' });
+  }
+});
+
+app.get('/api/profile/:handle', async (req, res) => {
+  try {
+    const handle = String(req.params.handle || '').toLowerCase();
+    if (!handle) {
+      return res.status(400).json({ ok: false, error: 'Handle is required' });
+    }
+    const profiles = await loadProfiles();
+    const profile = profiles.find((entry) => entry.handle === handle);
+    if (!profile) {
+      return res.status(404).json({ ok: false, error: 'Profile not found' });
+    }
+    const user = await getUserById(profile.user_id);
+    const stats = await buildProfileStats(profile.user_id);
+    return res.json({ ok: true, profile: mapProfileForClient(profile, user, stats) });
+  } catch (error) {
+    console.error('Failed to load public profile.', error);
+    return res.status(500).json({ ok: false, error: 'Failed to load profile' });
+  }
+});
+
+app.patch('/api/profile', async (req, res) => {
+  try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+    const user = await getUserById(session.sub);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    const { fields, files } = await parseMultipartRequest(req);
+    const handle = String(fields.handle || '').toLowerCase();
+    if (!handle) {
+      console.error('Profile update rejected: missing handle.', { userId: user.user_id });
+      return res.status(400).json({ ok: false, error: 'Handle is required' });
+    }
+    const profiles = await loadProfiles();
+    const existing = profiles.find((entry) => entry.handle === handle);
+    if (existing && existing.user_id !== user.user_id) {
+      console.error('Profile update rejected: handle taken.', {
+        userId: user.user_id,
+        handle
+      });
+      return res.status(409).json({ ok: false, error: 'Handle is already taken' });
+    }
+    const now = new Date().toISOString();
+    const current = profiles.find((entry) => entry.user_id === user.user_id);
+    let avatarUrl = current?.avatar_url || '';
+    if (files.avatar) {
+      avatarUrl = await persistProfileAvatar(files.avatar, user.user_id);
+    }
+    const demographics = {
+      age: fields.age ? Number(fields.age) : null,
+      gender: String(fields.gender || '').trim(),
+      city: String(fields.city || '').trim(),
+      country: String(fields.country || '').trim()
+    };
+    const nextProfile = {
+      user_id: user.user_id,
+      handle,
+      display_name: String(fields.display_name || ''),
+      bio: String(fields.bio || ''),
+      avatar_url: avatarUrl,
+      demographics,
+      created_at: current?.created_at || user.created_at || now,
+      updated_at: now
+    };
+    if (current) {
+      const index = profiles.findIndex((entry) => entry.user_id === user.user_id);
+      profiles[index] = nextProfile;
+    } else {
+      profiles.push(nextProfile);
+    }
+    await saveProfiles(profiles);
+    const stats = await buildProfileStats(user.user_id);
+    return res.json({ ok: true, profile: mapProfileForClient(nextProfile, user, stats) });
+  } catch (error) {
+    console.error('Failed to update profile.', error);
+    return res.status(500).json({ ok: false, error: 'Failed to update profile' });
   }
 });
 
@@ -1575,6 +1711,21 @@ async function saveArtifacts(rows) {
   await fs.writeFile(ARTIFACTS_FILE, JSON.stringify(rows, null, 2));
 }
 
+async function loadProfiles() {
+  try {
+    const text = await fs.readFile(PROFILES_FILE, 'utf8');
+    const data = JSON.parse(text);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveProfiles(rows) {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(PROFILES_FILE, JSON.stringify(rows, null, 2));
+}
+
 async function loadArtifactVersions() {
   try {
     const text = await fs.readFile(ARTIFACT_VERSIONS_FILE, 'utf8');
@@ -1588,6 +1739,19 @@ async function loadArtifactVersions() {
 async function saveArtifactVersions(rows) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(ARTIFACT_VERSIONS_FILE, JSON.stringify(rows, null, 2));
+}
+
+async function buildProfileStats(userId) {
+  const artifacts = await loadArtifacts();
+  const owned = artifacts.filter((artifact) => artifact.owner_user_id === userId);
+  const publicArtifacts = owned.filter((artifact) => artifact.visibility === 'public');
+  const forksReceived = artifacts.filter((artifact) => artifact.derived_from?.owner_user_id === userId).length;
+  return {
+    public_artifacts: publicArtifacts.length,
+    total_likes: owned.reduce((sum, artifact) => sum + (artifact?.stats?.likes || 0), 0),
+    total_comments: owned.reduce((sum, artifact) => sum + (artifact?.stats?.comments || 0), 0),
+    forks_received: forksReceived
+  };
 }
 
 function applyArtifactDefaults(artifact) {
@@ -1635,6 +1799,42 @@ function buildArtifactVersion({ artifactId, code, chat, sourceSession, label }) 
   };
 }
 
+function mapProfileForClient(profile, user, stats) {
+  return {
+    user_id: profile.user_id,
+    handle: profile.handle,
+    display_name: profile.display_name || user?.display_name || '',
+    bio: profile.bio || '',
+    avatar_url: profile.avatar_url || '',
+    demographics: profile.demographics || {},
+    created_at: profile.created_at || user?.created_at || '',
+    updated_at: profile.updated_at || profile.created_at || '',
+    stats
+  };
+}
+
+function validateArtifactPayload({ title, description, code, screenshotDataUrl }) {
+  const errors = [];
+  if (!String(title || '').trim()) {
+    errors.push('Title is required.');
+  }
+  if (!String(description || '').trim()) {
+    errors.push('Description is required.');
+  }
+  if (!code || !String(code.content || '').trim()) {
+    errors.push('Code content is required.');
+  }
+  if (!code || !String(code.language || '').trim()) {
+    errors.push('Code language is required.');
+  }
+  if (!screenshotDataUrl || typeof screenshotDataUrl !== 'string') {
+    errors.push('Screenshot is required.');
+  } else if (!screenshotDataUrl.startsWith('data:image/png;base64,')) {
+    errors.push('Screenshot must be a PNG data URL.');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 async function persistArtifactScreenshot(dataUrl, artifactId) {
   if (!dataUrl || typeof dataUrl !== 'string') {
     return '';
@@ -1649,6 +1849,118 @@ async function persistArtifactScreenshot(dataUrl, artifactId) {
   const filePath = path.join(ARTIFACT_UPLOADS_DIR, filename);
   await fs.writeFile(filePath, buffer);
   return `/uploads/artifacts/${filename}`;
+}
+
+async function persistProfileAvatar(file, userId) {
+  if (!file?.data || !file?.contentType) {
+    return '';
+  }
+  const extension = file.contentType.includes('jpeg')
+    ? 'jpg'
+    : file.contentType.includes('webp')
+      ? 'webp'
+      : 'png';
+  await fs.mkdir(PROFILE_UPLOADS_DIR, { recursive: true });
+  const filename = `${userId}-${Date.now()}.${extension}`;
+  const filePath = path.join(PROFILE_UPLOADS_DIR, filename);
+  await fs.writeFile(filePath, file.data);
+  return `/uploads/profiles/${filename}`;
+}
+
+async function parseMultipartRequest(req) {
+  const contentType = req.header('content-type') || '';
+  if (!contentType.startsWith('multipart/form-data')) {
+    return {
+      fields: req.body || {},
+      files: {}
+    };
+  }
+  const boundaryMatch = contentType.match(/boundary=(.+)$/);
+  if (!boundaryMatch) {
+    return { fields: {}, files: {} };
+  }
+  const boundary = boundaryMatch[1].replace(/^"|"$/g, '');
+  const body = await readRequestBody(req);
+  return parseMultipartFormData(body, boundary);
+}
+
+async function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function parseMultipartFormData(body, boundary) {
+  const boundaryBuffer = Buffer.from(`--${boundary}`);
+  const parts = splitBuffer(body, boundaryBuffer).slice(1, -1);
+  const fields = {};
+  const files = {};
+
+  parts.forEach((part) => {
+    const cleaned = trimBuffer(part);
+    if (!cleaned.length) {
+      return;
+    }
+    const headerEnd = cleaned.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd === -1) {
+      return;
+    }
+    const headerText = cleaned.slice(0, headerEnd).toString('utf8');
+    const content = cleaned.slice(headerEnd + 4);
+    const dispositionMatch = headerText.match(/name="([^"]+)"/);
+    if (!dispositionMatch) {
+      return;
+    }
+    const name = dispositionMatch[1];
+    const filenameMatch = headerText.match(/filename="([^"]*)"/);
+    if (filenameMatch && filenameMatch[1]) {
+      const contentTypeMatch = headerText.match(/Content-Type:\s*([^\r\n]+)/i);
+      files[name] = {
+        filename: filenameMatch[1],
+        contentType: contentTypeMatch ? contentTypeMatch[1].trim() : 'application/octet-stream',
+        data: trimTrailingNewline(content)
+      };
+      return;
+    }
+    fields[name] = trimTrailingNewline(content).toString('utf8');
+  });
+
+  return { fields, files };
+}
+
+function splitBuffer(buffer, delimiter) {
+  const parts = [];
+  let start = 0;
+  let index = buffer.indexOf(delimiter, start);
+  while (index !== -1) {
+    parts.push(buffer.slice(start, index));
+    start = index + delimiter.length;
+    index = buffer.indexOf(delimiter, start);
+  }
+  parts.push(buffer.slice(start));
+  return parts;
+}
+
+function trimBuffer(buffer) {
+  let start = 0;
+  let end = buffer.length;
+  if (buffer.slice(0, 2).toString() === '\r\n') {
+    start = 2;
+  }
+  if (buffer.slice(-2).toString() === '\r\n') {
+    end -= 2;
+  }
+  return buffer.slice(start, end);
+}
+
+function trimTrailingNewline(buffer) {
+  if (buffer.slice(-2).toString() === '\r\n') {
+    return buffer.slice(0, -2);
+  }
+  return buffer;
 }
 
 async function appendArtifactEvent({ eventType, userId, artifactId, sourceArtifactId, sessionId }) {

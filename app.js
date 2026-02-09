@@ -1,3 +1,5 @@
+"use strict";
+
 import { createSandboxController } from './sandboxController.js';
 import { formatNumber } from './utils/formatNumber.js';
 
@@ -1928,7 +1930,7 @@ async function loadHtml2Canvas() {
 }
 
 async function captureArtifactScreenshot() {
-  const target = document.querySelector('[data-artifact-screenshot="true"]') || consolePane;
+  const target = document.querySelector('[data-artifact-screenshot="true"]');
   if (!target) {
     return '';
   }
@@ -2449,13 +2451,13 @@ async function inferArtifactMetadata({ chat, code }) {
     const data = await res.json();
     return {
       title: data?.title || 'Untitled artifact',
-      description: data?.description || ''
+      description: data?.description || 'Description unavailable.'
     };
   } catch (error) {
     console.warn('Metadata inference failed.', error);
     return {
       title: 'Untitled artifact',
-      description: ''
+      description: 'Description unavailable.'
     };
   }
 }
@@ -2468,7 +2470,8 @@ async function createArtifact(payload) {
     body: JSON.stringify(payload)
   });
   if (!res.ok) {
-    throw new Error('Artifact save failed');
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || 'Artifact save failed');
   }
   const data = await res.json();
   return data?.artifact;
@@ -2482,7 +2485,8 @@ async function createArtifactVersion(artifactId, payload) {
     body: JSON.stringify(payload)
   });
   if (!res.ok) {
-    throw new Error('Artifact version save failed');
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.error || 'Artifact version save failed');
   }
   const data = await res.json();
   return data?.artifact;
@@ -2693,6 +2697,18 @@ async function handleSaveCodeArtifact() {
     screenshotDataUrl,
     onConfirm: async ({ title, description, visibility }) => {
       try {
+        if (!title.trim()) {
+          showToast('Title is required.');
+          return;
+        }
+        if (!description.trim()) {
+          showToast('Description is required.');
+          return;
+        }
+        if (!screenshotDataUrl) {
+          showToast('Screenshot capture failed. Please try again.');
+          return;
+        }
         const payload = {
           title,
           description,
@@ -2718,7 +2734,7 @@ async function handleSaveCodeArtifact() {
         await loadAccountArtifactSummary();
       } catch (error) {
         console.error('Artifact save failed.', error);
-        showToast('Unable to save artifact.');
+        showToast(error?.message || 'Unable to save artifact.');
       } finally {
         saveArtifactInProgress = false;
         updateSaveCodeButtonState();
@@ -2936,7 +2952,7 @@ async function handleArtifactDuplicate(artifactId) {
 
 async function handleArtifactImport(artifactId) {
   try {
-    const artifact = findArtifactInState(artifactId);
+    const sourceArtifact = findArtifactInState(artifactId);
     const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
       method: 'POST',
       credentials: 'include',
@@ -2944,16 +2960,16 @@ async function handleArtifactImport(artifactId) {
       body: JSON.stringify({
         session_id: sessionId,
         credits_used_estimate: sessionStats.creditsUsedEstimate || 0,
-        version_id: artifact?.current_version_id || null
+        version_id: sourceArtifact?.current_version_id || null
       })
     });
     if (!res.ok) {
       throw new Error('Import failed');
     }
     const data = await res.json();
-    const artifact = data?.artifact;
+    const importedArtifact = data?.artifact;
     startNewSession();
-    applyArtifactToEditor(artifact);
+    applyArtifactToEditor(importedArtifact);
     setRoute('/');
     showToast('Artifact imported to workspace.', { variant: 'success', duration: 2000 });
   } catch (error) {
@@ -7176,7 +7192,8 @@ if (profileEditForm) {
         body: formData
       });
       if (!res.ok) {
-        throw new Error('Profile update failed');
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Profile update failed');
       }
       const data = await res.json().catch(() => ({}));
       profileState.profile = data?.profile || data || profileState.profile;
@@ -7184,7 +7201,7 @@ if (profileEditForm) {
       setRoute('/account');
     } catch (error) {
       console.error('Profile update failed.', error);
-      showToast('Unable to update profile.');
+      showToast(error?.message || 'Unable to update profile.');
     } finally {
       if (profileSaveButton) {
         profileSaveButton.disabled = false;
