@@ -154,6 +154,8 @@ const creditUpgradeNudge = document.getElementById('credit-upgrade-nudge');
 const userMenuTrigger = document.getElementById('userMenuTrigger');
 const userMenu = document.getElementById('userMenu');
 const accountLink = document.getElementById('accountLink');
+const galleryLink = document.getElementById('galleryLink');
+const publicGalleryButton = document.getElementById('publicGalleryButton');
 const accountPage = document.getElementById('account-page');
 const accountBackButton = document.getElementById('accountBack');
 const accountEmailEl = document.getElementById('accountEmail');
@@ -176,6 +178,10 @@ const accountSessionCreditsEl = document.getElementById('accountSessionCredits')
 const accountSessionTokensEl = document.getElementById('accountSessionTokens');
 const accountClearSessionButton = document.getElementById('accountClearSession');
 const accountSaveSessionButton = document.getElementById('accountSaveSession');
+const accountArtifactsPrivateEl = document.getElementById('accountArtifactsPrivate');
+const accountArtifactsPublicEl = document.getElementById('accountArtifactsPublic');
+const accountViewGalleryButton = document.getElementById('accountViewGallery');
+const accountViewPublicGalleryButton = document.getElementById('accountViewPublicGallery');
 const accountSessionHistoryBody = document.getElementById('accountSessionHistoryBody');
 const accountSessionHistoryEmpty = document.getElementById('accountSessionHistoryEmpty');
 const accountHistoryRangeLabel = document.getElementById('accountHistoryRange');
@@ -198,6 +204,15 @@ const usageCloseButton = document.getElementById('usage-close');
 const usageTabs = document.querySelectorAll('.usage-tab');
 const usageTabPanels = document.querySelectorAll('.usage-tab-panel');
 const usageOpenButtons = document.querySelectorAll('[data-open-usage]');
+const saveCodeButton = document.getElementById('saveCodeBtn');
+const galleryPage = document.getElementById('gallery-page');
+const publicGalleryPage = document.getElementById('public-gallery-page');
+const galleryGrid = document.getElementById('galleryGrid');
+const publicGalleryGrid = document.getElementById('publicGalleryGrid');
+const galleryEmpty = document.getElementById('galleryEmpty');
+const publicGalleryEmpty = document.getElementById('publicGalleryEmpty');
+const galleryBackButton = document.getElementById('galleryBackButton');
+const publicGalleryBackButton = document.getElementById('publicGalleryBackButton');
 const usageScopeLabel = document.getElementById('usage-scope-label');
 const usageFilters = document.getElementById('usage-filters');
 const usageUserFilter = document.getElementById('usage-user-filter');
@@ -1051,6 +1066,7 @@ function clearEditorState() {
   updateRunButtonVisibility();
   updateRollbackVisibility();
   updatePromoteVisibility();
+  updateSaveCodeButtonState();
 }
 
 function clearPreviewState() {
@@ -1550,20 +1566,49 @@ function isAccountRoute() {
   return window.location.pathname === '/account';
 }
 
+function isGalleryRoute() {
+  return window.location.pathname === '/gallery';
+}
+
+function isPublicGalleryRoute() {
+  return window.location.pathname === '/gallery/public';
+}
+
 function updateRouteView() {
   const showAccount = isAccountRoute();
+  const showGallery = isGalleryRoute();
+  const showPublicGallery = isPublicGalleryRoute();
   if (accountPage) {
     accountPage.classList.toggle('hidden', !showAccount);
   }
   if (workspace) {
-    workspace.classList.toggle('hidden', showAccount);
+    workspace.classList.toggle('hidden', showAccount || showGallery || showPublicGallery);
+  }
+  if (galleryPage) {
+    galleryPage.classList.toggle('hidden', !showGallery);
+  }
+  if (publicGalleryPage) {
+    publicGalleryPage.classList.toggle('hidden', !showPublicGallery);
   }
   if (showAccount) {
     updateAccountOverview();
     updateAccountPlan();
     updateAccountSessionSnapshot();
+    loadAccountArtifactSummary().catch((error) => {
+      console.warn('Failed to load account artifact summary.', error);
+    });
     loadAccountUsageHistory().catch((error) => {
       console.warn('Failed to load account usage history.', error);
+    });
+  }
+  if (showGallery) {
+    loadPrivateGallery().catch((error) => {
+      console.warn('Failed to load private gallery.', error);
+    });
+  }
+  if (showPublicGallery) {
+    loadPublicGallery().catch((error) => {
+      console.warn('Failed to load public gallery.', error);
     });
   }
 }
@@ -1668,6 +1713,7 @@ function closeAllModals() {
 
 function unlockUI() {
   unlockChat();
+  unlockEditor();
   stopLoading();
   document.body.style.overflow = '';
 }
@@ -1772,6 +1818,533 @@ function updateLineNumbers() {
   }
   lineNumbersEl.textContent = numbers;
   lineCountEl.textContent = `Lines: ${lines}`;
+}
+
+function updateSaveCodeButtonState() {
+  if (!saveCodeButton || !codeEditor) {
+    return;
+  }
+  const hasContent = Boolean(codeEditor.value.trim());
+  saveCodeButton.disabled = !hasContent || saveArtifactInProgress;
+}
+
+function lockEditor() {
+  if (!codeEditor) {
+    return;
+  }
+  codeEditor.disabled = true;
+  codeEditor.classList.add('is-locked');
+}
+
+function unlockEditor() {
+  if (!codeEditor) {
+    return;
+  }
+  codeEditor.disabled = false;
+  codeEditor.classList.remove('is-locked');
+}
+
+async function loadHtml2Canvas() {
+  if (window.__HTML2CANVAS__) {
+    return window.__HTML2CANVAS__;
+  }
+  const module = await import('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/+esm');
+  window.__HTML2CANVAS__ = module.default || module;
+  return window.__HTML2CANVAS__;
+}
+
+async function captureArtifactScreenshot() {
+  const target = document.getElementById('right-pane') || workspace;
+  if (!target) {
+    return '';
+  }
+  const html2canvas = await loadHtml2Canvas();
+  const canvas = await html2canvas(target, {
+    backgroundColor: '#0f1115',
+    scale: 2,
+    useCORS: true
+  });
+  const maxWidth = 1600;
+  if (canvas.width <= maxWidth) {
+    return canvas.toDataURL('image/png');
+  }
+  const ratio = maxWidth / canvas.width;
+  const scaledCanvas = document.createElement('canvas');
+  scaledCanvas.width = maxWidth;
+  scaledCanvas.height = Math.round(canvas.height * ratio);
+  const ctx = scaledCanvas.getContext('2d');
+  ctx?.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+  return scaledCanvas.toDataURL('image/png');
+}
+
+function formatArtifactDate(dateValue) {
+  if (!dateValue) {
+    return '—';
+  }
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+async function fetchArtifacts(path) {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error('Failed to load artifacts');
+  }
+  const data = await res.json();
+  return data.artifacts || [];
+}
+
+function renderGalleryCards(artifacts, { mode }) {
+  if (!Array.isArray(artifacts)) {
+    return '';
+  }
+  const publicArtifactMap = new Map(artifacts.map((artifact) => [artifact.artifact_id, artifact]));
+  return artifacts.map((artifact) => {
+    const derived = artifact.derived_from?.artifact_id;
+    const source = derived ? publicArtifactMap.get(derived) : null;
+    const forkLabel = derived
+      ? `Forked from ${source?.title || 'Artifact'} by ${source?.owner_user_id || artifact.derived_from?.owner_user_id || 'Unknown'}`
+      : '';
+    const stats = artifact.stats || { forks: 0 };
+    const visibilityBadge = artifact.visibility === 'public' ? 'Public' : 'Private';
+    return `
+      <article class="artifact-card" data-artifact-id="${artifact.artifact_id}">
+        <div class="artifact-thumb">
+          ${artifact.screenshot_url ? `<img src="${artifact.screenshot_url}" alt="${artifact.title || 'Artifact'} screenshot" />` : '<div class="artifact-placeholder">No screenshot</div>'}
+          <span class="artifact-visibility">${visibilityBadge}</span>
+        </div>
+        <div class="artifact-body">
+          <h3>${artifact.title || 'Untitled artifact'}</h3>
+          <p>${artifact.description || 'No description provided.'}</p>
+          ${forkLabel ? `<div class="artifact-fork-label">${forkLabel}</div>` : ''}
+          <div class="artifact-meta">
+            <span>${artifact.code?.language || 'code'}</span>
+            <span>${formatArtifactDate(artifact.created_at)}</span>
+            ${mode === 'public' ? `<span>${stats.forks || 0} forks</span>` : ''}
+          </div>
+          <div class="artifact-actions">
+            <button class="ghost-button small" data-action="open">Open</button>
+            ${mode === 'private' ? `
+              <button class="ghost-button small" data-action="edit">Edit metadata</button>
+              <button class="ghost-button small" data-action="toggle-visibility">
+                ${artifact.visibility === 'public' ? 'Make private' : 'Make public'}
+              </button>
+              <button class="ghost-button small" data-action="duplicate">Duplicate</button>
+              <button class="ghost-button small danger" data-action="delete">Delete</button>
+            ` : `
+              <button class="ghost-button small" data-action="import">Fork / Import</button>
+            `}
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function applyArtifactToEditor(artifact) {
+  if (!artifact?.code?.content || !codeEditor) {
+    return;
+  }
+  codeEditor.value = artifact.code.content;
+  currentCode = artifact.code.content;
+  baselineCode = artifact.code.content;
+  lastLLMCode = artifact.code.content;
+  userHasEditedCode = false;
+  lastCodeSource = 'artifact';
+  updateRunButtonVisibility();
+  updateRollbackVisibility();
+  updatePromoteVisibility();
+  updateLineNumbers();
+  updateSaveCodeButtonState();
+  setPreviewStatus('Artifact loaded — click Run Code to apply');
+}
+
+async function loadPrivateGallery() {
+  const artifacts = await fetchArtifacts('/api/artifacts/private');
+  galleryState.privateArtifacts = artifacts;
+  if (galleryGrid) {
+    galleryGrid.innerHTML = renderGalleryCards(artifacts, { mode: 'private' });
+  }
+  const hasItems = artifacts.length > 0;
+  galleryEmpty?.classList.toggle('hidden', hasItems);
+}
+
+async function loadPublicGallery() {
+  const artifacts = await fetchArtifacts('/api/artifacts/public');
+  galleryState.publicArtifacts = artifacts;
+  if (publicGalleryGrid) {
+    publicGalleryGrid.innerHTML = renderGalleryCards(artifacts, { mode: 'public' });
+  }
+  const hasItems = artifacts.length > 0;
+  publicGalleryEmpty?.classList.toggle('hidden', hasItems);
+}
+
+async function loadAccountArtifactSummary() {
+  const artifacts = await fetchArtifacts('/api/artifacts/private');
+  const privateCount = artifacts.filter((artifact) => artifact.visibility === 'private').length;
+  const publicCount = artifacts.filter((artifact) => artifact.visibility === 'public').length;
+  if (accountArtifactsPrivateEl) {
+    accountArtifactsPrivateEl.textContent = String(privateCount);
+  }
+  if (accountArtifactsPublicEl) {
+    accountArtifactsPublicEl.textContent = String(publicCount);
+  }
+}
+
+async function inferArtifactMetadata({ transcript, code }) {
+  try {
+    const res = await fetch(`${API_BASE}/api/artifacts/metadata`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript,
+        code
+      })
+    });
+    if (!res.ok) {
+      throw new Error('Metadata inference failed');
+    }
+    const data = await res.json();
+    return {
+      title: data?.title || 'Untitled artifact',
+      description: data?.description || 'Saved code artifact.'
+    };
+  } catch (error) {
+    console.warn('Metadata inference failed.', error);
+    return {
+      title: 'Untitled artifact',
+      description: 'Saved code artifact.'
+    };
+  }
+}
+
+async function createArtifact(payload) {
+  const res = await fetch(`${API_BASE}/api/artifacts`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    throw new Error('Artifact save failed');
+  }
+  const data = await res.json();
+  return data?.artifact;
+}
+
+function openArtifactModal({ title, description, screenshotDataUrl, onConfirm, onCancel }) {
+  const html = `
+    <h2>Save code artifact</h2>
+    <p>Review the inferred details before saving this artifact.</p>
+    ${screenshotDataUrl ? `<img class="artifact-modal-preview" src="${screenshotDataUrl}" alt="Artifact preview" />` : ''}
+    <label class="modal-field">
+      <span>Title</span>
+      <input id="artifactTitleInput" type="text" value="${title.replace(/"/g, '&quot;')}" />
+    </label>
+    <label class="modal-field">
+      <span>Description</span>
+      <textarea id="artifactDescriptionInput" rows="3">${description}</textarea>
+    </label>
+    <label class="modal-field">
+      <span>Visibility</span>
+      <select id="artifactVisibilityInput">
+        <option value="private" selected>Private</option>
+        <option value="public">Public</option>
+      </select>
+    </label>
+    <div class="modal-actions">
+      <button id="artifactConfirmButton" type="button">Save artifact</button>
+      <button id="artifactCancelButton" class="secondary" type="button">Cancel</button>
+    </div>
+  `;
+  ModalManager.open(html, { dismissible: true, onClose: onCancel });
+
+  document.getElementById('artifactConfirmButton')?.addEventListener('click', () => {
+    const titleInput = document.getElementById('artifactTitleInput');
+    const descriptionInput = document.getElementById('artifactDescriptionInput');
+    const visibilityInput = document.getElementById('artifactVisibilityInput');
+    onConfirm({
+      title: titleInput?.value.trim() || 'Untitled artifact',
+      description: descriptionInput?.value.trim() || '',
+      visibility: visibilityInput?.value === 'public' ? 'public' : 'private'
+    });
+  });
+
+  document.getElementById('artifactCancelButton')?.addEventListener('click', () => {
+    ModalManager.close();
+    onCancel();
+  });
+}
+
+async function handleSaveCodeArtifact() {
+  if (!codeEditor || saveArtifactInProgress) {
+    return;
+  }
+  const content = codeEditor.value.trim();
+  if (!content) {
+    return;
+  }
+  saveArtifactInProgress = true;
+  updateSaveCodeButtonState();
+  abortActiveChat({ silent: true });
+  stopLoading();
+  lockChat();
+  lockEditor();
+
+  let screenshotDataUrl = '';
+  try {
+    screenshotDataUrl = await captureArtifactScreenshot();
+  } catch (error) {
+    console.warn('Screenshot capture failed.', error);
+  }
+
+  const transcript = getChatExportMessages().map((entry) => ({
+    role: entry.role,
+    content: entry.content
+  }));
+  const metadata = await inferArtifactMetadata({
+    transcript,
+    code: {
+      language: 'html',
+      content
+    }
+  });
+
+  openArtifactModal({
+    title: metadata.title,
+    description: metadata.description,
+    screenshotDataUrl,
+    onConfirm: async ({ title, description, visibility }) => {
+      try {
+        const artifact = await createArtifact({
+          title,
+          description,
+          visibility,
+          code: { language: 'html', content },
+          screenshot_data_url: screenshotDataUrl,
+          source_session: {
+            session_id: sessionId,
+            credits_used_estimate: sessionStats.creditsUsedEstimate || 0
+          }
+        });
+        showToast('Artifact saved.', { variant: 'success', duration: 2500 });
+        ModalManager.close();
+        if (artifact?.visibility === 'public') {
+          await loadPublicGallery();
+        }
+        await loadPrivateGallery();
+        await loadAccountArtifactSummary();
+      } catch (error) {
+        console.error('Artifact save failed.', error);
+        showToast('Unable to save artifact.');
+      } finally {
+        saveArtifactInProgress = false;
+        updateSaveCodeButtonState();
+        unlockChat();
+        unlockEditor();
+      }
+    },
+    onCancel: () => {
+      saveArtifactInProgress = false;
+      updateSaveCodeButtonState();
+      unlockChat();
+      unlockEditor();
+    }
+  });
+}
+
+function findArtifactInState(id) {
+  return (
+    galleryState.privateArtifacts.find((artifact) => artifact.artifact_id === id)
+    || galleryState.publicArtifacts.find((artifact) => artifact.artifact_id === id)
+  );
+}
+
+async function handleArtifactOpen(artifactId) {
+  const artifact = findArtifactInState(artifactId);
+  if (!artifact) {
+    return;
+  }
+  applyArtifactToEditor(artifact);
+  setRoute('/');
+}
+
+async function handleArtifactEdit(artifactId) {
+  const artifact = findArtifactInState(artifactId);
+  if (!artifact) {
+    return;
+  }
+  const html = `
+    <h2>Edit artifact metadata</h2>
+    <label class="modal-field">
+      <span>Title</span>
+      <input id="artifactEditTitle" type="text" value="${(artifact.title || '').replace(/"/g, '&quot;')}" />
+    </label>
+    <label class="modal-field">
+      <span>Description</span>
+      <textarea id="artifactEditDescription" rows="3">${artifact.description || ''}</textarea>
+    </label>
+    <div class="modal-actions">
+      <button id="artifactEditSave" type="button">Save</button>
+      <button id="artifactEditCancel" class="secondary" type="button">Cancel</button>
+    </div>
+  `;
+  ModalManager.open(html, { dismissible: true, onClose: () => {} });
+  document.getElementById('artifactEditSave')?.addEventListener('click', async () => {
+    const titleInput = document.getElementById('artifactEditTitle');
+    const descriptionInput = document.getElementById('artifactEditDescription');
+    try {
+      await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: titleInput?.value.trim() || artifact.title,
+          description: descriptionInput?.value.trim() || artifact.description
+        })
+      });
+      ModalManager.close();
+      await loadPrivateGallery();
+      await loadAccountArtifactSummary();
+      showToast('Artifact updated.', { variant: 'success', duration: 2000 });
+    } catch (error) {
+      console.error('Artifact update failed.', error);
+      showToast('Unable to update artifact.');
+    }
+  });
+  document.getElementById('artifactEditCancel')?.addEventListener('click', () => {
+    ModalManager.close();
+  });
+}
+
+async function handleArtifactDelete(artifactId) {
+  const html = `
+    <h2>Delete this artifact?</h2>
+    <p>This will permanently remove the artifact.</p>
+    <div class="modal-actions">
+      <button id="artifactDeleteConfirm" class="danger" type="button">Delete</button>
+      <button id="artifactDeleteCancel" class="secondary" type="button">Cancel</button>
+    </div>
+  `;
+  ModalManager.open(html, { dismissible: true, onClose: () => {} });
+  document.getElementById('artifactDeleteConfirm')?.addEventListener('click', async () => {
+    try {
+      await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      ModalManager.close();
+      await loadPrivateGallery();
+      await loadAccountArtifactSummary();
+      showToast('Artifact deleted.', { variant: 'success', duration: 2000 });
+    } catch (error) {
+      console.error('Artifact delete failed.', error);
+      showToast('Unable to delete artifact.');
+    }
+  });
+  document.getElementById('artifactDeleteCancel')?.addEventListener('click', () => {
+    ModalManager.close();
+  });
+}
+
+async function handleArtifactVisibilityToggle(artifactId) {
+  const artifact = findArtifactInState(artifactId);
+  if (!artifact) {
+    return;
+  }
+  const makePublic = artifact.visibility !== 'public';
+  const html = `
+    <h2>${makePublic ? 'Publish' : 'Make private'}?</h2>
+    <p>${makePublic ? 'Public artifacts cannot have their metadata edited later.' : 'Only you will be able to view this artifact.'}</p>
+    <div class="modal-actions">
+      <button id="artifactVisibilityConfirm" type="button">${makePublic ? 'Publish' : 'Make private'}</button>
+      <button id="artifactVisibilityCancel" class="secondary" type="button">Cancel</button>
+    </div>
+  `;
+  ModalManager.open(html, { dismissible: true, onClose: () => {} });
+  document.getElementById('artifactVisibilityConfirm')?.addEventListener('click', async () => {
+    try {
+      await fetch(`${API_BASE}/api/artifacts/${artifactId}/visibility`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visibility: makePublic ? 'public' : 'private' })
+      });
+      ModalManager.close();
+      await loadPrivateGallery();
+      await loadAccountArtifactSummary();
+      if (makePublic) {
+        await loadPublicGallery();
+      }
+      showToast(`Artifact ${makePublic ? 'published' : 'made private'}.`, {
+        variant: 'success',
+        duration: 2000
+      });
+    } catch (error) {
+      console.error('Artifact visibility update failed.', error);
+      showToast('Unable to update visibility.');
+    }
+  });
+  document.getElementById('artifactVisibilityCancel')?.addEventListener('click', () => {
+    ModalManager.close();
+  });
+}
+
+async function handleArtifactDuplicate(artifactId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        credits_used_estimate: sessionStats.creditsUsedEstimate || 0
+      })
+    });
+    if (!res.ok) {
+      throw new Error('Fork failed');
+    }
+    await loadPrivateGallery();
+    await loadAccountArtifactSummary();
+    showToast('Artifact duplicated.', { variant: 'success', duration: 2000 });
+  } catch (error) {
+    console.error('Artifact duplicate failed.', error);
+    showToast('Unable to duplicate artifact.');
+  }
+}
+
+async function handleArtifactImport(artifactId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        credits_used_estimate: sessionStats.creditsUsedEstimate || 0
+      })
+    });
+    if (!res.ok) {
+      throw new Error('Import failed');
+    }
+    const data = await res.json();
+    const artifact = data?.artifact;
+    startNewSession();
+    applyArtifactToEditor(artifact);
+    setRoute('/');
+    showToast('Artifact imported to workspace.', { variant: 'success', duration: 2000 });
+  } catch (error) {
+    console.error('Artifact import failed.', error);
+    showToast('Unable to import artifact.');
+  }
 }
 
 function getCreditState() {
@@ -3856,10 +4429,15 @@ let intentAnchor = null;
 let chatAbortController = null;
 let chatAbortSilent = false;
 let clearChatInProgress = false;
+let saveArtifactInProgress = false;
 const DEBUG_INTENT = false;
 const chatState = {
   locked: false,
   unlockTimerId: null
+};
+const galleryState = {
+  privateArtifacts: [],
+  publicArtifacts: []
 };
 
 const sandbox = createSandboxController({
@@ -4107,6 +4685,12 @@ if (copyCodeBtn && codeEditor) {
       copyCodeBtn.classList.remove('copied');
       copyCodeBtn.title = 'Copy code';
     }, 1200);
+  });
+}
+
+if (saveCodeButton) {
+  saveCodeButton.addEventListener('click', () => {
+    handleSaveCodeArtifact();
   });
 }
 
@@ -5006,6 +5590,7 @@ function setCodeFromLLM(code) {
   updateRollbackVisibility();
   updatePromoteVisibility();
   updateLineNumbers();
+  updateSaveCodeButtonState();
   setPreviewStatus('Preview updated by assistant');
 }
 
@@ -5016,6 +5601,7 @@ function handleUserRun(code, source = 'user', statusMessage = 'Applying your edi
   updateRunButtonVisibility();
   updateRollbackVisibility();
   updatePromoteVisibility();
+  updateSaveCodeButtonState();
   setPreviewStatus(statusMessage);
   handleLLMOutput(code, source);
 }
@@ -5487,8 +6073,46 @@ if (accountLink) {
   });
 }
 
+if (galleryLink) {
+  galleryLink.addEventListener('click', (event) => {
+    event.preventDefault();
+    closeUserMenu?.();
+    setRoute('/gallery');
+  });
+}
+
+if (publicGalleryButton) {
+  publicGalleryButton.addEventListener('click', () => {
+    setRoute('/gallery/public');
+  });
+}
+
+if (accountViewGalleryButton) {
+  accountViewGalleryButton.addEventListener('click', () => {
+    setRoute('/gallery');
+  });
+}
+
+if (accountViewPublicGalleryButton) {
+  accountViewPublicGalleryButton.addEventListener('click', () => {
+    setRoute('/gallery/public');
+  });
+}
+
 if (accountBackButton) {
   accountBackButton.addEventListener('click', () => {
+    setRoute('/');
+  });
+}
+
+if (galleryBackButton) {
+  galleryBackButton.addEventListener('click', () => {
+    setRoute('/');
+  });
+}
+
+if (publicGalleryBackButton) {
+  publicGalleryBackButton.addEventListener('click', () => {
     setRoute('/');
   });
 }
@@ -5556,6 +6180,52 @@ if (accountSessionHistoryBody) {
       downloadSessionExport(summary, 'md');
     } else {
       downloadSessionExport(summary, 'txt');
+    }
+  });
+}
+
+if (galleryGrid) {
+  galleryGrid.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) {
+      return;
+    }
+    const card = button.closest('[data-artifact-id]');
+    const artifactId = card?.dataset.artifactId;
+    if (!artifactId) {
+      return;
+    }
+    const action = button.dataset.action;
+    if (action === 'open') {
+      handleArtifactOpen(artifactId);
+    } else if (action === 'edit') {
+      handleArtifactEdit(artifactId);
+    } else if (action === 'delete') {
+      handleArtifactDelete(artifactId);
+    } else if (action === 'toggle-visibility') {
+      handleArtifactVisibilityToggle(artifactId);
+    } else if (action === 'duplicate') {
+      handleArtifactDuplicate(artifactId);
+    }
+  });
+}
+
+if (publicGalleryGrid) {
+  publicGalleryGrid.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) {
+      return;
+    }
+    const card = button.closest('[data-artifact-id]');
+    const artifactId = card?.dataset.artifactId;
+    if (!artifactId) {
+      return;
+    }
+    const action = button.dataset.action;
+    if (action === 'open') {
+      handleArtifactOpen(artifactId);
+    } else if (action === 'import') {
+      handleArtifactImport(artifactId);
     }
   });
 }
@@ -5796,6 +6466,7 @@ codeEditor.addEventListener('input', () => {
   }
   resetExecutionPreparation();
   updateLineNumbers();
+  updateSaveCodeButtonState();
   requestCreditPreviewUpdate();
 });
 
@@ -5818,6 +6489,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateRunButtonVisibility();
   updateRollbackVisibility();
   updatePromoteVisibility();
+  updateSaveCodeButtonState();
   console.log('✅ Run Code listener attached');
   runButton.addEventListener('click', () => {
     console.log('🟢 Run Code clicked');
