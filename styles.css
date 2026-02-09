@@ -1468,6 +1468,17 @@ button:disabled {
   cursor: not-allowed;
 }
 
+#revertButton.runtime-running::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #f4c24f;
+  display: inline-block;
+  margin-left: 6px;
+  box-shadow: 0 0 0 2px rgba(244, 194, 79, 0.2);
+}
+
 .ghost-button {
   background: transparent;
   color: var(--text);

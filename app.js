@@ -352,6 +352,12 @@ const AUTH_STORAGE_KEYS = [
   'maya_user',
   'maya_token'
 ];
+const runtimeState = {
+  status: 'idle',
+  started_at: null
+};
+let revertInProgress = false;
+let revertModalOpen = false;
 const GENERATION_PHASES = [
   {
     afterMs: 2500,
@@ -4107,6 +4113,38 @@ function isSandboxExecuting() {
   return previewExecutionStatus?.classList.contains('running') || sandboxAnimationState === 'running';
 }
 
+let runtimeStateSyncId = null;
+
+function isRuntimeRunning() {
+  return runtimeState.status === 'running' || runtimeState.status === 'terminating';
+}
+
+function setRuntimeState(status) {
+  runtimeState.status = status;
+  runtimeState.started_at = status === 'running' ? Date.now() : null;
+  updateRevertButtonState();
+}
+
+function scheduleRuntimeStateSync() {
+  if (runtimeStateSyncId) {
+    return;
+  }
+  runtimeStateSyncId = window.setInterval(() => {
+    if (runtimeState.status !== 'running') {
+      clearInterval(runtimeStateSyncId);
+      runtimeStateSyncId = null;
+      return;
+    }
+    if (!sandbox?.state?.running) {
+      setRuntimeState('idle');
+    }
+  }, 300);
+}
+
+async function resetRuntime() {
+  await hardStopRuntime();
+}
+
 function canShowPaywall() {
   return !isGenerating && !isSandboxExecuting();
 }
@@ -6910,6 +6948,7 @@ function pauseSandbox() {
   setSandboxAnimationState('paused');
   setPreviewExecutionStatus('paused', 'PAUSED');
   setPreviewStatus('Animation paused');
+  setRuntimeState('idle');
 }
 
 function resumeSandbox() {
@@ -6920,6 +6959,8 @@ function resumeSandbox() {
   setSandboxAnimationState('running');
   setPreviewExecutionStatus('running', 'RUNNING · ANIMATION MODE');
   setPreviewStatus('Running animation…');
+  setRuntimeState('running');
+  scheduleRuntimeStateSync();
 }
 
 function resetSandbox() {
@@ -6935,6 +6976,21 @@ function stopSandboxFromUser() {
   setSandboxControlsVisible(false);
   setPreviewExecutionStatus('stopped', '🛑 Stopped');
   setPreviewStatus('Sandbox stopped by user.');
+  setRuntimeState('idle');
+}
+
+async function hardStopRuntime() {
+  if (runtimeState.status === 'idle') {
+    return;
+  }
+  setRuntimeState('terminating');
+  sandbox.stop('revert');
+  resetSandboxFrame();
+  setSandboxAnimationState('stopped');
+  setSandboxControlsVisible(false);
+  setPreviewExecutionStatus('stopped', '🛑 Stopped');
+  setPreviewStatus('Execution stopped for revert.');
+  setRuntimeState('idle');
 }
 
 async function handleLLMOutput(code, source = 'generated') {
@@ -6947,15 +7003,19 @@ async function handleLLMOutput(code, source = 'generated') {
   const activeFrame = resetSandboxFrame();
   if (!activeFrame) {
     appendOutput('Sandbox iframe missing.', 'error');
+    setRuntimeState('idle');
     return;
   }
 
   outputPanel?.classList.add('loading');
   setSandboxControlsVisible(sandboxMode === 'animation');
   setSandboxAnimationState('running');
+  setRuntimeState('running');
+  scheduleRuntimeStateSync();
   await waitForIframeReady(activeFrame, 900);
   if (sandboxFrame !== activeFrame) {
     console.warn('Iframe swapped during compile; aborting run.');
+    setRuntimeState('idle');
     return;
   }
   const codeWithSession = injectSessionBridge(code);
@@ -7007,8 +7067,112 @@ function updateRevertButtonState() {
   }
   const activeIndex = getActiveVersionIndex();
   const hasHistory = codeVersionStack.length > 1 && activeIndex > 0;
+  const runtimeRunning = isRuntimeRunning();
   revertButton.disabled = !hasHistory;
   revertButton.setAttribute('aria-disabled', hasHistory ? 'false' : 'true');
+  revertButton.classList.toggle('runtime-running', runtimeRunning);
+  const baseTitle = 'Revert to last generated code';
+  revertButton.title = runtimeRunning
+    ? `${baseTitle} · Code is running`
+    : baseTitle;
+}
+
+function revertToPreviousVersion() {
+  const currentIndex = getActiveVersionIndex();
+  if (currentIndex <= 0) {
+    return;
+  }
+  const previousIndex = currentIndex - 1;
+  const previousVersion = codeVersionStack[previousIndex];
+  if (!previousVersion || typeof previousVersion.content !== 'string') {
+    return;
+  }
+  codeEditor.value = previousVersion.content;
+  setActiveVersionByIndex(previousIndex);
+  updateRevertButtonState();
+  userHasEditedCode = codeEditor.value !== baselineCode;
+  lastCodeSource = previousVersion.source === 'llm' ? 'llm' : 'user';
+  updateRunButtonVisibility();
+  updateRollbackVisibility();
+  updatePromoteVisibility();
+  updateLineNumbers();
+  updateSaveCodeButtonState();
+  emitCodeStateChanged(previousVersion);
+  resetExecutionPreparation();
+  requestCreditPreviewUpdate();
+  showToast('Reverted to previous version', { variant: 'success', duration: 2500 });
+}
+
+function setRevertModalButtonsDisabled(disabled) {
+  const cancelButton = document.getElementById('revertWhileRunningCancel');
+  const confirmButton = document.getElementById('revertWhileRunningConfirm');
+  if (cancelButton) {
+    cancelButton.disabled = disabled;
+  }
+  if (confirmButton) {
+    confirmButton.disabled = disabled;
+  }
+}
+
+function showRevertWhileRunningDialog() {
+  if (revertModalOpen) {
+    return Promise.resolve();
+  }
+  revertModalOpen = true;
+  return new Promise((resolve) => {
+    const html = `
+      <h2>Code is currently running</h2>
+      <p>Reverting will stop the current execution before restoring the previous version.</p>
+      <div class="modal-actions">
+        <button id="revertWhileRunningCancel" class="secondary" type="button">Cancel</button>
+        <button id="revertWhileRunningConfirm" type="button">Stop &amp; Revert</button>
+      </div>
+    `;
+    ModalManager.open(html, { dismissible: true, onClose: () => {
+      revertModalOpen = false;
+      resolve();
+    } });
+
+    document.getElementById('revertWhileRunningCancel')?.addEventListener('click', () => {
+      if (!revertModalOpen) {
+        return;
+      }
+      ModalManager.close();
+    });
+    document.getElementById('revertWhileRunningConfirm')?.addEventListener('click', async () => {
+      if (!revertModalOpen) {
+        return;
+      }
+      setRevertModalButtonsDisabled(true);
+      await confirmStopAndRevert();
+      ModalManager.close();
+    });
+  });
+}
+
+async function confirmStopAndRevert() {
+  await hardStopRuntime();
+  revertToPreviousVersion();
+}
+
+async function requestRevert() {
+  if (!isRuntimeRunning()) {
+    revertToPreviousVersion();
+    return;
+  }
+  await showRevertWhileRunningDialog();
+}
+
+async function safeRevert() {
+  if (revertInProgress) {
+    return;
+  }
+  revertInProgress = true;
+  try {
+    await requestRevert();
+  } finally {
+    revertInProgress = false;
+  }
 }
 
 function updatePromoteVisibility() {
@@ -7048,6 +7212,7 @@ function getActiveCodeVersion() {
 function emitCodeStateChanged(codeVersion) {
   sandbox.stop('code-change');
   resetSandboxFrame();
+  setRuntimeState('idle');
   markPreviewStale();
   if (codeVersion?.id) {
     console.debug('Code version changed:', codeVersion.id);
@@ -8275,29 +8440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.warn('⚠️ Revert button not found');
   } else {
     revertButton.addEventListener('click', () => {
-      const currentIndex = getActiveVersionIndex();
-      if (currentIndex <= 0) {
-        return;
-      }
-      const previousIndex = currentIndex - 1;
-      const previousVersion = codeVersionStack[previousIndex];
-      if (!previousVersion || typeof previousVersion.content !== 'string') {
-        return;
-      }
-      codeEditor.value = previousVersion.content;
-      setActiveVersionByIndex(previousIndex);
-      updateRevertButtonState();
-      userHasEditedCode = codeEditor.value !== baselineCode;
-      lastCodeSource = previousVersion.source === 'llm' ? 'llm' : 'user';
-      updateRunButtonVisibility();
-      updateRollbackVisibility();
-      updatePromoteVisibility();
-      updateLineNumbers();
-      updateSaveCodeButtonState();
-      emitCodeStateChanged(previousVersion);
-      resetExecutionPreparation();
-      requestCreditPreviewUpdate();
-      showToast('Reverted to previous version', { variant: 'success', duration: 2500 });
+      safeRevert();
     });
   }
   if (!rollbackButton) {
