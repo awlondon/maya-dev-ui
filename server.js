@@ -61,99 +61,55 @@ app.get('/api/me', (req, res) => {
 });
 
 /**
- * CHAT
+ * ⚠️ CORE PRODUCT FUNCTION
+ * REAL LLM CHAT IMPLEMENTATION
+ * DO NOT STUB OR MODIFY WITHOUT PRESERVING FULL LLM PATH
  */
-app.post('/api/chat', (req, res) => {
-  if (!OPENAI_API_KEY) {
-    res.status(500).json({ error: 'OPENAI_API_KEY is not configured' });
+app.post('/api/chat', async (req, res) => {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
     return;
   }
 
-  const messages = req.body?.messages;
+  const { messages } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
-    res.status(400).json({ error: 'Request body must include a messages array with at least one item.' });
+    res.status(400).json({ error: 'Missing messages.' });
     return;
   }
 
-  const sanitizedMessages = messages
-    .filter((message) => message && typeof message === 'object')
-    .map((message) => ({
-      role: typeof message.role === 'string' ? message.role : 'user',
-      content: typeof message.content === 'string' ? message.content : ''
-    }));
-  const inputMessages = [
-    { role: 'system', content: CHAT_SYSTEM_PROMPT },
-    ...sanitizedMessages
-  ];
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    res.status(500).json({ error: 'Missing OPENAI_API_KEY on the server.' });
+    return;
+  }
 
-  fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      input: inputMessages
-    })
-  })
-    .then(async (response) => {
-      const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        const message = data?.error?.message || 'OpenAI API request failed';
-        throw new Error(message);
-      }
-
-      const outputText =
-        data?.output_text
-        ?? data?.output?.[0]?.content?.[0]?.text
-        ?? '';
-      if (!outputText || typeof outputText !== 'string') {
-        throw new Error('Model returned no output text.');
-      }
-
-      const trimmed = outputText.trim();
-      const jsonCandidate = trimmed
-        .replace(/^```(?:json)?/i, '')
-        .replace(/```$/i, '')
-        .trim();
-      const firstBrace = jsonCandidate.indexOf('{');
-      const lastBrace = jsonCandidate.lastIndexOf('}');
-      const jsonString = firstBrace !== -1 && lastBrace !== -1
-        ? jsonCandidate.slice(firstBrace, lastBrace + 1)
-        : jsonCandidate;
-
-      let parsed;
-      try {
-        parsed = JSON.parse(jsonString);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown JSON parse error';
-        throw new Error(`Failed to parse model JSON response: ${message}`);
-      }
-
-      const assistantText = typeof parsed?.assistant?.text === 'string'
-        ? parsed.assistant.text
-        : '';
-      const ui = parsed?.ui ?? {};
-      const payload = {
-        assistant: {
-          text: assistantText
-        },
-        ui: {
-          html: typeof ui.html === 'string' ? ui.html : '',
-          css: typeof ui.css === 'string' ? ui.css : '',
-          js: typeof ui.js === 'string' ? ui.js : ''
-        }
-      };
-
-      res.json(payload);
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({
-        error: message || 'Sorry, something went wrong.'
-      });
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4.1-mini',
+        messages,
+        stream: false
+      })
     });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      res.status(response.status).send(errorText || 'Upstream error.');
+      return;
+    }
+
+    const data = await response.json();
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unexpected server error.'
+    });
+  }
 });
 
 /**
