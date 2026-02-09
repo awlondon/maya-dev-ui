@@ -526,8 +526,13 @@ async function initializeCodeEditor({ value, language }) {
   if (editorApi) {
     return;
   }
-  if (window.__monacoReadyPromise) {
-    await window.__monacoReadyPromise;
+  if (!window.__monacoReady) {
+    await new Promise((resolve) => {
+      const handleReady = () => {
+        resolve();
+      };
+      window.addEventListener('monaco:ready', handleReady, { once: true });
+    });
   }
   if (typeof window.mountEditor !== 'function') {
     throw new Error('mountEditor is not available.');
@@ -659,9 +664,12 @@ const SESSION_BRIDGE_SCRIPT = `${SESSION_BRIDGE_MARKER}
     });
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  function tryMountEditor() {
     mountEditor("editor", "// hello");
-  });
+  }
+
+  document.addEventListener("DOMContentLoaded", tryMountEditor);
+  window.addEventListener("monaco:ready", tryMountEditor);
 </script>
 
 <script id="dev-session-bridge">
@@ -5238,13 +5246,162 @@ function renderPricingPlans(plans) {
     const monthlyCredits = Number(plan.monthly_credits);
     const dailyCap = Number(plan.daily_cap);
     const cta = isFree
-      ? `<p class=\"tier-note\">${priceLabel} / month</p>`
-      : `<button class=\"tier-cta\" type=\"button\" data-plan-select=\"${plan.tier}\">\n          Choose ${plan.display_name}\n        </button>`;
+      ? `<p class="tier-note">${priceLabel} / month</p>`
+      : `<button class="tier-cta" type="button" data-plan-select="${plan.tier}">
+          Choose ${plan.display_name}
+        </button>`;
     const planNote = isFree ? `${priceLabel} / month` : priceLabel;
     const currentBadge = currentPlan === plan.tier
-      ? `<span class=\"tier-badge\">Current</span>`
+      ? `<span class="tier-badge">Current</span>`
       : '';
-    return `\n      <div class=\"tier-card\" data-plan-tier=\"${plan.tier}\">\n        <div class=\"tier-header\">\n          <span>${plan.display_name}</span>\n          ${currentBadge}\n        </div>\n        <ul>\n          <li>${Number.isFinite(monthlyCredits) ? `${formatCreditNumber(monthlyCredits)} credits / month` : 'Monthly credits'}</li>\n          <li>${Number.isFinite(dailyCap) ? `Daily cap: ${formatCreditNumber(dailyCap)} credits` : 'Daily cap varies by usage'}</li>\n          <li>${isFree ? 'Basic generation speed' : 'Priority generation & faster runs'}</li>\n        </ul>\n        <p class=\"tier-note\">${planNote}</p>\n        ${isFree ? '' : cta}\n      </div>\n    `;\n  }).join('');\n+  pricingPlanGrid.innerHTML = cards;\n+  const ctaButtons = pricingPlanGrid.querySelectorAll('[data-plan-select]');\n+  ctaButtons.forEach((button) => {\n+    button.addEventListener('click', () => {\n+      const tier = button.dataset.planSelect;\n+      openStripeCheckout('subscription', tier);\n+    });\n+  });\n+}\n+\n+function renderPaywallPlans(plans) {\n+  if (!paywallPlanCardContainer || !paywallPlanSelector || !paywallPlanTable) {\n+    return;\n+  }\n+  const freePlan = plans.find((plan) => plan.tier === 'free');\n+  const paidPlans = plans.filter((plan) => plan.tier !== 'free');\n+  const allPlans = freePlan ? [freePlan, ...paidPlans] : paidPlans;\n+  const recommendedTier = paidPlans[0]?.tier;\n+\n+  paywallPlanCardContainer.innerHTML = paidPlans.map((plan) => {\n+    const priceLabel = formatPlanPrice(plan);\n+    const monthlyCredits = Number(plan.monthly_credits);\n+    const dailyCap = Number(plan.daily_cap);\n+    const isRecommended = plan.tier === recommendedTier;\n+    return `\n      <div class=\"paywall-plan-card ${isRecommended ? 'is-recommended' : ''}\" data-paywall-plan-card=\"${plan.tier}\">\n+        <div>\n+          <p class=\"plan-label\">${plan.display_name}${isRecommended ? ' (recommended)' : ''}</p>\n+          <h3>${plan.display_name}</h3>\n+          <p class=\"plan-price\">${priceLabel}</p>\n+        </div>\n+        <ul>\n+          <li>${Number.isFinite(monthlyCredits) ? `${formatCreditNumber(monthlyCredits)} monthly credits` : 'Monthly credits included'}</li>\n+          <li>${Number.isFinite(dailyCap) ? `Daily cap: ${formatCreditNumber(dailyCap)} credits` : 'Daily cap based on usage'}</li>\n+          <li>Priority queue included</li>\n+        </ul>\n+      </div>\n+    `;\n+  }).join('');\n+\n+  paywallPlanSelector.innerHTML = paidPlans.map((plan, index) => {\n+    const isSelected = index === 0;\n+    return `\n      <button class=\"plan-chip ${isSelected ? 'is-selected' : ''}\" type=\"button\" data-paywall-plan=\"${plan.tier}\" aria-pressed=\"${isSelected}\">\n+        ${plan.display_name}\n+      </button>\n+    `;\n+  }).join('');\n+\n+  const headerCells = allPlans.map((plan) => {\n+    const isRecommended = plan.tier === recommendedTier;\n+    return `<th data-paywall-plan-cell=\"${plan.tier}\" class=\"${isRecommended ? 'is-recommended' : ''}\">${plan.display_name}</th>`;\n+  }).join('');\n+\n+  const bodyRows = [\n+    {\n+      label: 'Monthly credits',\n+      value: (plan) => Number.isFinite(Number(plan.monthly_credits))\n+        ? formatCreditNumber(Number(plan.monthly_credits))\n+        : '—'\n+    },\n+    {\n+      label: 'Daily cap',\n+      value: (plan) => Number.isFinite(Number(plan.daily_cap))\n+        ? formatCreditNumber(Number(plan.daily_cap))\n+        : '—'\n+    },\n+    {\n+      label: 'Price',\n+      value: (plan) => formatPlanPrice(plan)\n+    }\n+  ].map((row) => {\n+    const cells = allPlans.map((plan) => {\n+      return `<td data-paywall-plan-cell=\"${plan.tier}\">${row.value(plan)}</td>`;\n+    }).join('');\n+    return `<tr><th scope=\"row\">${row.label}</th>${cells}</tr>`;\n+  }).join('');\n+\n+  paywallPlanTable.innerHTML = `\n+    <table class=\"paywall-table paywall-compare-table\" aria-label=\"Plan comparison\">\n+      <thead>\n+        <tr>\n+          <th></th>\n+          ${headerCells}\n+        </tr>\n+      </thead>\n+      <tbody>\n+        ${bodyRows}\n+      </tbody>\n+    </table>\n+  `;\n+\n+  refreshPaywallElements();\n+  bindPaywallPlanButtons();\n+}\n+\n+async function hydratePlanCatalog() {\n+  try {\n+    const res = await fetch(`${API_BASE}/api/plans`, {\n+      credentials: 'include'\n+    });\n+    const data = await res.json().catch(() => ({}));\n+    if (res.ok && Array.isArray(data?.plans)) {\n+      planCatalog = data.plans.map((plan) => ({\n+        ...plan,\n+        tier: plan.tier?.toString().toLowerCase()\n+      }));\n+    }\n+  } catch {\n+    // ignore and fall back\n+  }\n+  const plans = getAvailablePlans();\n+  renderPricingPlans(plans);\n+  renderPaywallPlans(plans);\n+  const initialSelectedPlan = getStoredPaywallPlan() || getDefaultPaidPlanTier();\n+  updatePaywallPlanSelection(initialSelectedPlan);\n+  updatePaywallCtas(paywallModal?.dataset.mode || 'firm', initialSelectedPlan);\n+}\n+\n+function bindPaywallPlanButtons() {\n+  paywallPlanButtons.forEach((button) => {\n+    button.onclick = () => {\n+      const plan = button.dataset.paywallPlan;\n+      if (!plan) {\n+        return;\n+      }\n+      updatePaywallPlanSelection(plan);\n+      const currentMode = paywallModal?.dataset.mode || 'firm';\n+      updatePaywallCtas(currentMode, plan);\n+    };\n+  });\n+}\n*** End Patch"}): code for functions.apply_patch. Need JSON. use apply_patch tool. let's run properly. 
+    return `
+      <div class="tier-card" data-plan-tier="${plan.tier}">
+        <div class="tier-header">
+          <span>${plan.display_name}</span>
+          ${currentBadge}
+        </div>
+        <ul>
+          <li>${Number.isFinite(monthlyCredits) ? `${formatCreditNumber(monthlyCredits)} credits / month` : 'Monthly credits'}</li>
+          <li>${Number.isFinite(dailyCap) ? `Daily cap: ${formatCreditNumber(dailyCap)} credits` : 'Daily cap varies by usage'}</li>
+          <li>${isFree ? 'Basic generation speed' : 'Priority generation & faster runs'}</li>
+        </ul>
+        <p class="tier-note">${planNote}</p>
+        ${isFree ? '' : cta}
+      </div>
+    `;
+  }).join('');
+  pricingPlanGrid.innerHTML = cards;
+  const ctaButtons = pricingPlanGrid.querySelectorAll('[data-plan-select]');
+  ctaButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const tier = button.dataset.planSelect;
+      openStripeCheckout('subscription', tier);
+    });
+  });
+}
+
+function renderPaywallPlans(plans) {
+  if (!paywallPlanCardContainer || !paywallPlanSelector || !paywallPlanTable) {
+    return;
+  }
+  const freePlan = plans.find((plan) => plan.tier === 'free');
+  const paidPlans = plans.filter((plan) => plan.tier !== 'free');
+  const allPlans = freePlan ? [freePlan, ...paidPlans] : paidPlans;
+  const recommendedTier = paidPlans[0]?.tier;
+
+  paywallPlanCardContainer.innerHTML = paidPlans.map((plan) => {
+    const priceLabel = formatPlanPrice(plan);
+    const monthlyCredits = Number(plan.monthly_credits);
+    const dailyCap = Number(plan.daily_cap);
+    const isRecommended = plan.tier === recommendedTier;
+    return `
+      <div class="paywall-plan-card ${isRecommended ? 'is-recommended' : ''}" data-paywall-plan-card="${plan.tier}">
+        <div>
+          <p class="plan-label">${plan.display_name}${isRecommended ? ' (recommended)' : ''}</p>
+          <h3>${plan.display_name}</h3>
+          <p class="plan-price">${priceLabel}</p>
+        </div>
+        <ul>
+          <li>${Number.isFinite(monthlyCredits) ? `${formatCreditNumber(monthlyCredits)} monthly credits` : 'Monthly credits included'}</li>
+          <li>${Number.isFinite(dailyCap) ? `Daily cap: ${formatCreditNumber(dailyCap)} credits` : 'Daily cap based on usage'}</li>
+          <li>Priority queue included</li>
+        </ul>
+      </div>
+    `;
+  }).join('');
+
+  paywallPlanSelector.innerHTML = paidPlans.map((plan, index) => {
+    const isSelected = index === 0;
+    return `
+      <button class="plan-chip ${isSelected ? 'is-selected' : ''}" type="button" data-paywall-plan="${plan.tier}" aria-pressed="${isSelected}">
+        ${plan.display_name}
+      </button>
+    `;
+  }).join('');
+
+  const headerCells = allPlans.map((plan) => {
+    const isRecommended = plan.tier === recommendedTier;
+    return `<th data-paywall-plan-cell="${plan.tier}" class="${isRecommended ? 'is-recommended' : ''}">${plan.display_name}</th>`;
+  }).join('');
+
+  const bodyRows = [
+    {
+      label: 'Monthly credits',
+      value: (plan) => Number.isFinite(Number(plan.monthly_credits))
+        ? formatCreditNumber(Number(plan.monthly_credits))
+        : '—'
+    },
+    {
+      label: 'Daily cap',
+      value: (plan) => Number.isFinite(Number(plan.daily_cap))
+        ? formatCreditNumber(Number(plan.daily_cap))
+        : '—'
+    },
+    {
+      label: 'Price',
+      value: (plan) => formatPlanPrice(plan)
+    }
+  ].map((row) => {
+    const cells = allPlans.map((plan) => {
+      return `<td data-paywall-plan-cell="${plan.tier}">${row.value(plan)}</td>`;
+    }).join('');
+    return `<tr><th scope="row">${row.label}</th>${cells}</tr>`;
+  }).join('');
+
+  paywallPlanTable.innerHTML = `
+    <table class="paywall-table paywall-compare-table" aria-label="Plan comparison">
+      <thead>
+        <tr>
+          <th></th>
+          ${headerCells}
+        </tr>
+      </thead>
+      <tbody>
+        ${bodyRows}
+      </tbody>
+    </table>
+  `;
+
+  refreshPaywallElements();
+  bindPaywallPlanButtons();
+}
+
+async function hydratePlanCatalog() {
+  try {
+    const res = await fetch(`${API_BASE}/api/plans`, {
+      credentials: 'include'
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && Array.isArray(data?.plans)) {
+      planCatalog = data.plans.map((plan) => ({
+        ...plan,
+        tier: plan.tier?.toString().toLowerCase()
+      }));
+    }
+  } catch {
+    // ignore and fall back
+  }
+  const plans = getAvailablePlans();
+  renderPricingPlans(plans);
+  renderPaywallPlans(plans);
+  const initialSelectedPlan = getStoredPaywallPlan() || getDefaultPaidPlanTier();
+  updatePaywallPlanSelection(initialSelectedPlan);
+  updatePaywallCtas(paywallModal?.dataset.mode || 'firm', initialSelectedPlan);
+}
+
+function bindPaywallPlanButtons() {
+  paywallPlanButtons.forEach((button) => {
+    button.onclick = () => {
+      const plan = button.dataset.paywallPlan;
+      if (!plan) {
+        return;
+      }
+      updatePaywallPlanSelection(plan);
+      const currentMode = paywallModal?.dataset.mode || 'firm';
+      updatePaywallCtas(currentMode, plan);
+    };
+  });
+}
 
 function showPaywall({ reason, estimate, remaining, modeOverride } = {}) {
   if (!paywallModal || !canShowPaywall() || hasPaywallUpgradeCompleted()) {
