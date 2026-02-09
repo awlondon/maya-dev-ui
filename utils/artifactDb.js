@@ -401,6 +401,45 @@ export async function deleteArtifact({ artifactId, ownerUserId }) {
   return result.rowCount > 0;
 }
 
+export async function deletePrivateArtifactsForUser(ownerUserId) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `DELETE FROM artifacts
+     WHERE owner_user_id = $1 AND visibility = 'private'`,
+    [ownerUserId]
+  );
+  return result.rowCount;
+}
+
+export async function unpublishPublicArtifactsForUser(ownerUserId) {
+  const pool = getArtifactsDbPool();
+  const result = await pool.query(
+    `UPDATE artifacts
+     SET visibility = 'private',
+         title = 'Deleted artifact',
+         description = '',
+         chat_history_public = false,
+         versioning_enabled = false,
+         source_session = NULL,
+         updated_at = NOW()
+     WHERE owner_user_id = $1 AND visibility = 'public'
+     RETURNING id`,
+    [ownerUserId]
+  );
+
+  if (result.rowCount > 0) {
+    const artifactIds = result.rows.map((row) => row.id);
+    await pool.query(
+      `UPDATE artifact_versions
+       SET chat = NULL
+       WHERE artifact_id = ANY($1::uuid[])`,
+      [artifactIds]
+    );
+  }
+
+  return result.rowCount;
+}
+
 export async function forkArtifact({
   sourceArtifactId,
   ownerUserId,

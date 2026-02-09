@@ -187,6 +187,8 @@ const accountArtifactsPublicEl = document.getElementById('accountArtifactsPublic
 const accountViewGalleryButton = document.getElementById('accountViewGallery');
 const accountViewPublicGalleryButton = document.getElementById('accountViewPublicGallery');
 const accountViewProfileButton = document.getElementById('accountViewProfile');
+const accountNewsletterOptIn = document.getElementById('accountNewsletterOptIn');
+const accountPreferencesStatus = document.getElementById('accountPreferencesStatus');
 const accountSessionHistoryBody = document.getElementById('accountSessionHistoryBody');
 const accountSessionHistoryEmpty = document.getElementById('accountSessionHistoryEmpty');
 const accountHistoryRangeLabel = document.getElementById('accountHistoryRange');
@@ -833,7 +835,7 @@ function renderAuthModalHTML() {
       </div>
 
       <label class="newsletter">
-        <input type="checkbox" checked />
+        <input type="checkbox" />
         Receive product updates and announcements
       </label>
     </div>
@@ -868,6 +870,7 @@ function bootstrapAuthenticatedUI(user) {
   renderCredits();
   updateAccountOverview();
   updateAccountPlan();
+  updateAccountPreferences();
   renderUI();
 }
 
@@ -2341,6 +2344,59 @@ function updateAccountPlan() {
   updateAccountActions(planTierValue);
 }
 
+function updateAccountPreferences() {
+  if (!accountPage) {
+    return;
+  }
+  const user = resolveAccountUser();
+  const preferences = user?.preferences || {};
+  const newsletterOptIn = typeof preferences.newsletter_opt_in === 'boolean'
+    ? preferences.newsletter_opt_in
+    : false;
+  if (accountNewsletterOptIn) {
+    accountNewsletterOptIn.checked = newsletterOptIn;
+  }
+  if (accountPreferencesStatus) {
+    accountPreferencesStatus.textContent = 'Preferences sync automatically.';
+  }
+}
+
+async function saveAccountPreferences({ newsletterOptIn }) {
+  if (!API_BASE) {
+    return false;
+  }
+  if (!Auth.user) {
+    return false;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/account/preferences`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newsletter_opt_in: newsletterOptIn })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || 'Preference update failed');
+    }
+    const nextPreferences = data?.preferences || { newsletter_opt_in: newsletterOptIn };
+    if (Auth.user) {
+      Auth.user.preferences = nextPreferences;
+    }
+    if (currentUser) {
+      currentUser.preferences = nextPreferences;
+    }
+    if (accountState.user) {
+      accountState.user.preferences = nextPreferences;
+    }
+    persistSessionStorage({ user: Auth.user });
+    return true;
+  } catch (error) {
+    console.warn('Failed to update preferences.', error);
+    return false;
+  }
+}
+
 function updateAccountSessionSnapshot() {
   if (!accountPage) {
     return;
@@ -2544,6 +2600,20 @@ function resetAppToUnauthed() {
   showAuthModal();
 }
 
+async function requestLogout() {
+  if (!API_BASE) {
+    return;
+  }
+  try {
+    await fetch(`${API_BASE}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include'
+    });
+  } catch (error) {
+    console.warn('Failed to logout.', error);
+  }
+}
+
 async function signOut() {
   console.log('🔒 Signing out user');
 
@@ -2557,6 +2627,8 @@ async function signOut() {
   } catch (err) {
     console.warn('Auth provider cleanup failed', err);
   }
+
+  await requestLogout();
 
   Auth.user = null;
   Auth.token = null;
@@ -2574,6 +2646,26 @@ async function signOut() {
   resetAppToUnauthed();
 
   console.log('✅ Signed out cleanly');
+}
+
+async function requestAccountDeletion() {
+  if (!API_BASE) {
+    return false;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/account`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data?.error || 'Account deletion failed');
+    }
+    return true;
+  } catch (error) {
+    console.warn('Account deletion failed.', error);
+    return false;
+  }
 }
 
 function renderAuth() {
@@ -2664,6 +2756,7 @@ function updateRouteView() {
   if (showAccount) {
     updateAccountOverview();
     updateAccountPlan();
+    updateAccountPreferences();
     updateAccountSessionSnapshot();
     loadAccountArtifactSummary().catch((error) => {
       console.warn('Failed to load account artifact summary.', error);
@@ -8843,9 +8936,75 @@ if (accountHistoryLoadMore) {
   });
 }
 
+if (accountNewsletterOptIn) {
+  accountNewsletterOptIn.addEventListener('change', async () => {
+    const nextValue = accountNewsletterOptIn.checked;
+    const previousValue = !nextValue;
+    accountNewsletterOptIn.disabled = true;
+    if (accountPreferencesStatus) {
+      accountPreferencesStatus.textContent = 'Saving preferences...';
+    }
+    const saved = await saveAccountPreferences({ newsletterOptIn: nextValue });
+    if (!saved) {
+      accountNewsletterOptIn.checked = previousValue;
+      if (accountPreferencesStatus) {
+        accountPreferencesStatus.textContent = 'Unable to save preferences.';
+      }
+      showToast('We could not save your preferences. Please try again.', { variant: 'error' });
+    } else if (accountPreferencesStatus) {
+      accountPreferencesStatus.textContent = 'Preferences saved.';
+    }
+    accountNewsletterOptIn.disabled = false;
+  });
+}
+
 if (accountSignOutButton) {
   accountSignOutButton.addEventListener('click', () => {
     signOut();
+  });
+}
+
+if (accountDeleteButton) {
+  accountDeleteButton.addEventListener('click', () => {
+    ModalManager.open(`
+      <h3>Delete your account?</h3>
+      <p>This will remove private artifacts, unpublish public ones, and sign you out immediately.</p>
+      <label class="modal-input">
+        <span>Type <strong>DELETE</strong> to confirm</span>
+        <input id="accountDeleteConfirmInput" type="text" placeholder="DELETE" />
+      </label>
+      <div class="modal-actions">
+        <button class="secondary" onclick="ModalManager.close()">Cancel</button>
+        <button class="danger" id="confirmAccountDelete" disabled>Delete account</button>
+      </div>
+    `, { dismissible: true });
+
+    requestAnimationFrame(() => {
+      const input = document.getElementById('accountDeleteConfirmInput');
+      const confirmButton = document.getElementById('confirmAccountDelete');
+      if (!input || !confirmButton) {
+        return;
+      }
+
+      const updateState = () => {
+        confirmButton.disabled = input.value.trim().toUpperCase() !== 'DELETE';
+      };
+      input.addEventListener('input', updateState);
+      updateState();
+
+      confirmButton.addEventListener('click', async () => {
+        confirmButton.disabled = true;
+        const success = await requestAccountDeletion();
+        if (!success) {
+          confirmButton.disabled = false;
+          showToast('Account deletion failed. Please try again.', { variant: 'error' });
+          return;
+        }
+        ModalManager.close();
+        showToast('Account deleted.', { variant: 'success' });
+        await signOut();
+      });
+    });
   });
 }
 

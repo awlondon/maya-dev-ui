@@ -35,17 +35,20 @@ import {
   createArtifact,
   createArtifactVersion,
   deleteArtifact,
+  deletePrivateArtifactsForUser,
   fetchArtifactById,
   fetchArtifactVersions,
   fetchArtifactsByOwner,
   fetchPublicArtifacts,
   forkArtifact,
+  unpublishPublicArtifactsForUser,
   updateArtifactMetadata,
   updateArtifactPublishSettings,
   updateArtifactVisibility
 } from './utils/artifactDb.js';
 import {
   buildProfileStats,
+  deleteProfile,
   fetchProfileByHandle,
   fetchProfileByUserId,
   fetchProfileHandleOwner,
@@ -251,6 +254,87 @@ app.get('/api/me', async (req, res) => {
   } catch (error) {
     console.error('Failed to load /me.', error);
     return res.status(500).json({ ok: false, error: 'Failed to load session' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.patch('/api/account/preferences', async (req, res) => {
+  try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+    const user = await getUserById(session.sub);
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+
+    const newsletterOptIn = req.body?.newsletter_opt_in;
+    if (typeof newsletterOptIn !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'Invalid preferences payload' });
+    }
+
+    const nextPreferences = {
+      ...(user.preferences || {}),
+      newsletter_opt_in: newsletterOptIn
+    };
+
+    const updated = await updateUser(session.sub, {
+      preferences: nextPreferences
+    });
+
+    return res.json({
+      ok: true,
+      preferences: nextPreferences,
+      user: mapUserForClient(updated)
+    });
+  } catch (error) {
+    console.error('Failed to update preferences.', error);
+    return res.status(500).json({ ok: false, error: 'Failed to update preferences' });
+  }
+});
+
+app.delete('/api/account', async (req, res) => {
+  try {
+    const session = await getSessionFromRequest(req);
+    if (!session) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+
+    const user = await getUserById(session.sub, { includeDeleted: true });
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    if (user.deleted_at) {
+      return res.status(410).json({ ok: false, error: 'Account already deleted' });
+    }
+
+    await deletePrivateArtifactsForUser(session.sub);
+    await unpublishPublicArtifactsForUser(session.sub);
+    await deleteProfile(session.sub);
+
+    const anonymizedEmail = `deleted+${session.sub}@example.com`;
+    const deletedAt = new Date();
+    await updateUser(session.sub, {
+      email: anonymizedEmail,
+      display_name: 'Deleted User',
+      auth_providers: [],
+      preferences: {
+        ...(user.preferences || {}),
+        newsletter_opt_in: false
+      },
+      deleted_at: deletedAt
+    });
+
+    clearSessionCookie(res);
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Failed to delete account.', error);
+    return res.status(500).json({ ok: false, error: 'Failed to delete account' });
   }
 });
 
@@ -1658,6 +1742,9 @@ app.post('/api/auth/google', async (req, res) => {
 
     return issueSessionCookie(res, req, user);
   } catch (error) {
+    if (error?.message === 'USER_DELETED') {
+      return res.status(403).json({ ok: false, error: 'Account deleted' });
+    }
     console.error('Google auth error', error);
     return res.status(500).json({ ok: false, error: 'Google auth failed' });
   }
@@ -1726,6 +1813,9 @@ app.post('/api/auth/email/verify', async (req, res) => {
 
     return issueSessionCookie(res, req, user);
   } catch (error) {
+    if (error?.message === 'USER_DELETED') {
+      return res.status(403).json({ ok: false, error: 'Account deleted' });
+    }
     console.error('Email token verification failed.', error);
     return res.status(500).json({ ok: false, error: 'Email verification failed' });
   }
@@ -1760,6 +1850,9 @@ app.get('/auth/email', async (req, res) => {
 
     issueSessionCookie(res, req, user, { redirect: true });
   } catch (error) {
+    if (error?.message === 'USER_DELETED') {
+      return res.redirect(process.env.FRONTEND_URL || '/');
+    }
     console.error('Email callback failed.', error);
     res.redirect(process.env.FRONTEND_URL || '/');
   }
@@ -1801,6 +1894,9 @@ app.post('/api/auth/apple', async (req, res) => {
 
     return issueSessionCookie(res, req, user);
   } catch (error) {
+    if (error?.message === 'USER_DELETED') {
+      return res.status(403).json({ ok: false, error: 'Account deleted' });
+    }
     console.error('Apple auth failed.', error);
     return res.status(500).json({ ok: false, error: 'Apple auth failed' });
   }
@@ -2018,6 +2114,23 @@ async function issueSessionCookie(res, req, user, options = {}) {
   });
 }
 
+function clearSessionCookie(res) {
+  const cookieParts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Secure',
+    'SameSite=None',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+  ];
+
+  if (process.env.COOKIE_DOMAIN) {
+    cookieParts.push(`Domain=${process.env.COOKIE_DOMAIN}`);
+  }
+
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
 async function getSessionFromRequest(req) {
   if (!process.env.SESSION_SECRET) {
     return null;
@@ -2069,7 +2182,8 @@ function mapUserForClient(user) {
     monthly_reset_at: user.monthly_reset_at,
     daily_credit_limit: resolveDailyCreditLimit(user),
     creditsRemaining: creditsRemaining,
-    creditsTotal: creditsTotal
+    creditsTotal: creditsTotal,
+    preferences: user.preferences || {}
   };
 }
 

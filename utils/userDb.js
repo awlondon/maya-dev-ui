@@ -24,6 +24,8 @@ import { getUsageAnalyticsPool } from './usageAnalytics.js';
  * @property {string} stripe_subscription_id
  * @property {string} auth_provider
  * @property {string[] | null} auth_providers
+ * @property {Record<string, unknown> | null} preferences
+ * @property {string | null} deleted_at
  */
 
 function getUserDbPool() {
@@ -108,7 +110,9 @@ function mapUserRow(row) {
     stripe_customer_id: row.stripe_customer_id || '',
     stripe_subscription_id: row.stripe_subscription_id || '',
     auth_provider: primaryProvider,
-    auth_providers: providerNames.length ? providerNames : null
+    auth_providers: providerNames.length ? providerNames : null,
+    preferences: row.preferences || {},
+    deleted_at: toIsoString(row.deleted_at)
   };
 }
 
@@ -169,6 +173,8 @@ async function fetchUserRowById(queryable, userId) {
       u.created_at,
       u.last_seen_at,
       u.auth_providers,
+      u.preferences,
+      u.deleted_at,
       b.plan_tier,
       b.stripe_customer_id,
       b.stripe_subscription_id,
@@ -202,6 +208,8 @@ async function fetchUserRowByProviderOrEmail(queryable, provider, providerUserId
       u.created_at,
       u.last_seen_at,
       u.auth_providers,
+      u.preferences,
+      u.deleted_at,
       b.plan_tier,
       b.stripe_customer_id,
       b.stripe_subscription_id,
@@ -265,9 +273,13 @@ async function ensureCreditsRow(client, {
   );
 }
 
-export async function getUserById(userId, { pool } = {}) {
+export async function getUserById(userId, { pool, includeDeleted = false } = {}) {
   const activePool = pool || getUserDbPool();
   const row = await fetchUserRowById(activePool, userId);
+  if (!row) return null;
+  if (row.deleted_at && !includeDeleted) {
+    return null;
+  }
   return mapUserRow(row);
 }
 
@@ -400,6 +412,9 @@ export async function findOrCreateUser({
       });
       row = await fetchUserRowById(client, userId);
     } else {
+      if (row.deleted_at) {
+        throw new Error('USER_DELETED');
+      }
       const updatedProviders = mergeAuthProviders(row.auth_providers, provider, providerUserId);
       await client.query(
         `UPDATE users
@@ -467,6 +482,14 @@ export async function updateUser(userId, patch, { pool } = {}) {
     if (patch.auth_providers !== undefined) {
       userUpdates.push(`auth_providers = $${index++}`);
       userValues.push(JSON.stringify(patch.auth_providers));
+    }
+    if (patch.preferences !== undefined) {
+      userUpdates.push(`preferences = $${index++}`);
+      userValues.push(JSON.stringify(patch.preferences));
+    }
+    if (patch.deleted_at !== undefined) {
+      userUpdates.push(`deleted_at = $${index++}`);
+      userValues.push(patch.deleted_at);
     }
     if (userUpdates.length) {
       userUpdates.push(`last_seen_at = $${index++}`);

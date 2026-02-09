@@ -268,6 +268,23 @@
 
       <section class="account-section">
         <div class="account-section-header">
+          <h3>Preferences</h3>
+          <p>Manage notifications and account-level preferences.</p>
+        </div>
+        <div class="account-card account-preferences">
+          <label class="account-toggle">
+            <input id="accountNewsletterOptIn" type="checkbox" />
+            <span>
+              <strong>Product updates</strong>
+              <span class="account-muted">Receive product updates and announcements.</span>
+            </span>
+          </label>
+          <p id="accountPreferencesStatus" class="account-muted">Preferences sync automatically.</p>
+        </div>
+      </section>
+
+      <section class="account-section">
+        <div class="account-section-header">
           <h3>Usage history</h3>
           <p>Session-level usage over the last 30 days.</p>
         </div>
@@ -341,7 +358,7 @@
         </div>
         <div class="account-action-row">
           <button id="accountSignOut" class="ghost-button" type="button">Sign out</button>
-          <button id="accountDelete" class="ghost-button danger" type="button" disabled>Delete account (coming soon)</button>
+          <button id="accountDelete" class="ghost-button danger" type="button">Delete account</button>
           <a class="ghost-button subtle" href="mailto:support@maya.dev">Support / contact</a>
         </div>
       </section>
