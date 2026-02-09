@@ -180,32 +180,19 @@ app.post('/api/artifacts/metadata', async (req, res) => {
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : chat;
     const code = req.body?.code || {};
     const filteredMessages = selectMetadataMessages(messages);
+    const hasChatContext = filteredMessages.some((entry) => entry.role === 'user');
+    const promptContent = hasChatContext
+      ? buildChatPlusCodePrompt(filteredMessages, code)
+      : buildCodeOnlyPrompt(code);
     const prompt = [
       {
-        role: 'system',
-        content: `Generate a concise title (max 60 chars) and a 1–2 sentence description
-for a saved code artifact. Be factual, not promotional.
-
-Return JSON only:
-{
-  "title": "...",
-  "description": "..."
-}`
-      },
-      {
         role: 'user',
-        content: JSON.stringify({
-          messages: filteredMessages,
-          code
-        })
+        content: promptContent
       }
     ];
 
     if (!LLM_PROXY_URL) {
-      return res.json({
-        title: 'Untitled artifact',
-        description: ''
-      });
+      return res.json(normalizeMetadata({}));
     }
 
     const workerRes = await fetch(LLM_PROXY_URL, {
@@ -221,10 +208,7 @@ Return JSON only:
     });
 
     if (!workerRes.ok) {
-      return res.json({
-        title: 'Untitled artifact',
-        description: ''
-      });
+      return res.json(normalizeMetadata({}));
     }
 
     const responseText = await workerRes.text();
@@ -246,16 +230,10 @@ Return JSON only:
       parsed = null;
     }
 
-    res.json({
-      title: parsed?.title || 'Untitled artifact',
-      description: parsed?.description || ''
-    });
+    res.json(normalizeMetadata(parsed || {}));
   } catch (error) {
     console.error('Failed to infer artifact metadata.', error);
-    res.json({
-      title: 'Untitled artifact',
-      description: ''
-    });
+    res.json(normalizeMetadata({}));
   }
 });
 
@@ -2228,6 +2206,65 @@ function resolveArtifactCode(body) {
     };
   }
   return null;
+}
+
+function buildChatPlusCodePrompt(messages = [], code = {}) {
+  const recentUserMessages = messages
+    .filter((entry) => entry?.role === 'user')
+    .map((entry) => String(entry.content || '').trim())
+    .filter(Boolean)
+    .join('\n');
+  const codeSnippet = typeof code?.content === 'string' ? code.content : '';
+  return `You are generating metadata for a saved code artifact.
+
+Use BOTH the user chat context and the code.
+
+Return:
+- A short, concrete title (max 60 chars)
+- A one-sentence description (max 160 chars)
+
+Chat:
+${recentUserMessages}
+
+Code:
+${codeSnippet}
+
+Output JSON ONLY:
+{
+  "title": "...",
+  "description": "..."
+}`;
+}
+
+function buildCodeOnlyPrompt(code = {}) {
+  const codeLanguage = typeof code?.language === 'string' ? code.language : '';
+  const codeSnippet = typeof code?.content === 'string' ? code.content : '';
+  return `You are generating metadata for a saved code artifact.
+
+There is NO chat context.
+Infer intent and functionality from the code alone.
+
+Code language: ${codeLanguage}
+
+Code:
+${codeSnippet}
+
+Return JSON ONLY:
+{
+  "title": "...",
+  "description": "..."
+}`;
+}
+
+function normalizeMetadata(result = {}) {
+  return {
+    title: typeof result.title === 'string' && result.title.trim()
+      ? result.title.trim()
+      : '',
+    description: typeof result.description === 'string' && result.description.trim()
+      ? result.description.trim()
+      : ''
+  };
 }
 
 function selectMetadataMessages(messages = []) {
