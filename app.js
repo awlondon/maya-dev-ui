@@ -4,7 +4,11 @@ if (!window.GOOGLE_CLIENT_ID) {
   console.warn('Missing GOOGLE_CLIENT_ID. Google auth disabled.');
 }
 
-const API_BASE = window.__MAYA_API_BASE;
+const API_BASE =
+  location.hostname.includes('localhost')
+    ? 'http://localhost:8080'
+    : 'https://maya-api-136741418395.us-central1.run.app';
+
 
 const AuthController = (() => {
   const providers = new Map();
