@@ -55,6 +55,17 @@ Canonical schema lives in Postgres migrations (see `data/migrations/001_create_u
 | metadata | text | Serialized metadata. |
 | created_at | timestamptz | Ledger timestamp. |
 
+### `billing_events`
+
+| Field | Type | Description |
+| --- | --- | --- |
+| stripe_event_id | text | Stripe event identifier (primary key). |
+| type | text | Stripe event type (e.g. `checkout.session.completed`). |
+| user_id | uuid | FK to users (nullable when unresolved). |
+| processed_at | timestamptz | Timestamp for last processing attempt. |
+| status | text | `received`, `processed`, `failed`. |
+| payload_hash | text | SHA-256 hash of the raw webhook payload. |
+
 ## Notes
 
 - Apple may return email only on the first login; the stored provider IDs remain the primary identity link.

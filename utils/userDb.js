@@ -38,6 +38,22 @@ function getUserDbPool() {
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
+function logCreditEvent(level, message, context = {}) {
+  const payload = {
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    ...context
+  };
+  if (level === 'error') {
+    console.error(JSON.stringify(payload));
+  } else if (level === 'warn') {
+    console.warn(JSON.stringify(payload));
+  } else {
+    console.log(JSON.stringify(payload));
+  }
+}
+
 function addMonthsUtc(date, months) {
   const next = new Date(date.getTime());
   next.setUTCMonth(next.getUTCMonth() + months);
@@ -665,6 +681,16 @@ export async function applyCreditDeduction({
       if (existing) {
         const balanceAfter = Number(existing.balance_after);
         if (Number.isFinite(balanceAfter)) {
+          logCreditEvent('info', 'credit_deduction_duplicate', {
+            user_id: userId,
+            session_id: sessionId || '',
+            request_id: turnId || '',
+            reason,
+            credits_to_charge: creditsToCharge,
+            balance_before: currentBalance,
+            balance_after: balanceAfter,
+            outcome: 'duplicate'
+          });
           const update = buildCreditRowUpdate({
             balance: monthlyResetApplied ? currentBalance : balanceAfter,
             dailyUsed,
@@ -697,6 +723,15 @@ export async function applyCreditDeduction({
       : Number(creditsRow.monthly_quota ?? 0);
 
     if (currentBalance < creditsToCharge) {
+      logCreditEvent('warn', 'credit_deduction_insufficient', {
+        user_id: userId,
+        session_id: sessionId || '',
+        request_id: turnId || '',
+        reason,
+        credits_to_charge: creditsToCharge,
+        balance_before: currentBalance,
+        outcome: 'insufficient'
+      });
       throw new Error('INSUFFICIENT_CREDITS');
     }
 
@@ -738,9 +773,42 @@ export async function applyCreditDeduction({
     );
 
     await client.query('COMMIT');
+    logCreditEvent('info', 'credit_deduction_applied', {
+      user_id: userId,
+      session_id: sessionId || '',
+      request_id: turnId || '',
+      reason,
+      credits_to_charge: creditsToCharge,
+      balance_before: currentBalance,
+      balance_after: nextBalance,
+      outcome: 'applied'
+    });
     return { nextBalance, alreadyCharged: false };
   } catch (error) {
     await client.query('ROLLBACK');
+    if (error?.code === '23505' && turnId) {
+      const ledgerResult = await client.query(
+        `SELECT balance_after
+         FROM credit_ledger
+         WHERE user_id = $1 AND turn_id = $2 AND reason = $3
+         LIMIT 1`,
+        [userId, turnId, reason]
+      );
+      const existing = ledgerResult.rows[0];
+      if (existing) {
+        const balanceAfter = Number(existing.balance_after);
+        logCreditEvent('info', 'credit_deduction_duplicate', {
+          user_id: userId,
+          session_id: sessionId || '',
+          request_id: turnId || '',
+          reason,
+          credits_to_charge: creditsToCharge,
+          balance_after: balanceAfter,
+          outcome: 'unique_constraint'
+        });
+        return { nextBalance: balanceAfter, alreadyCharged: true };
+      }
+    }
     throw error;
   } finally {
     client.release();
