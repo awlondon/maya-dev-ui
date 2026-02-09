@@ -138,3 +138,13 @@ export async function buildProfileStats(userId) {
     forks_received: Number(forkResult.rows[0]?.forks_received || 0)
   };
 }
+
+export async function deleteProfile(userId) {
+  const pool = getProfilesDbPool();
+  const result = await pool.query(
+    `DELETE FROM profiles
+     WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rowCount > 0;
+}
