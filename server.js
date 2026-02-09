@@ -32,6 +32,11 @@ import {
   updateUser
 } from './utils/userDb.js';
 import {
+  computePayloadHash,
+  recordBillingEvent,
+  updateBillingEventStatus
+} from './utils/billingEvents.js';
+import {
   createArtifact,
   createArtifactVersion,
   createArtifactReport,
@@ -94,6 +99,22 @@ const STRIPE_CREDIT_PACKS = (() => {
     return {};
   }
 })();
+
+function logStructured(level, message, context = {}) {
+  const payload = {
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    ...context
+  };
+  if (level === 'error') {
+    console.error(JSON.stringify(payload));
+  } else if (level === 'warn') {
+    console.warn(JSON.stringify(payload));
+  } else {
+    console.log(JSON.stringify(payload));
+  }
+}
 const PLAN_CATALOG = (() => {
   const catalog = {};
   const baseFree = {
@@ -420,6 +441,8 @@ app.post('/api/artifacts/metadata', async (req, res) => {
 });
 
 app.post('/api/artifacts', async (req, res) => {
+  let artifactId = '';
+  let userId = '';
   try {
     const session = await getSessionFromRequest(req);
     if (!session) {
@@ -430,6 +453,7 @@ app.post('/api/artifacts', async (req, res) => {
     if (!user) {
       return res.status(404).json({ ok: false, error: 'User not found' });
     }
+    userId = user.user_id;
 
     const screenshotDataUrl = resolveScreenshotDataUrl(req.body);
     const resolvedCode = resolveArtifactCode(req.body) || { language: 'html', content: '' };
@@ -450,7 +474,7 @@ app.post('/api/artifacts', async (req, res) => {
       return res.status(400).json({ ok: false, error: validation.errors.join(' ') });
     }
 
-    const artifactId = crypto.randomUUID();
+    artifactId = crypto.randomUUID();
     const code = resolvedCode;
     const screenshotUrl = await storageAdapter.saveArtifactScreenshot(screenshotDataUrl, artifactId);
     const derivedFrom = req.body?.derived_from || { artifact_id: null, owner_user_id: null };
@@ -510,6 +534,15 @@ app.post('/api/artifacts', async (req, res) => {
       });
     }
 
+    logStructured('info', 'artifact_created', {
+      user_id: user.user_id,
+      artifact_id: artifactId,
+      source_artifact_id: artifact.derived_from?.artifact_id || null,
+      session_id: artifact.source_session?.session_id || '',
+      visibility,
+      outcome: 'success'
+    });
+
     return res.json({
       ok: true,
       artifact: applyArtifactDefaults(artifact),
@@ -517,12 +550,19 @@ app.post('/api/artifacts', async (req, res) => {
       screenshot_url: artifact.screenshot_url || ''
     });
   } catch (error) {
+    logStructured('error', 'artifact_create_failed', {
+      user_id: userId || null,
+      artifact_id: artifactId || null,
+      error: error?.message || 'unknown_error'
+    });
     console.error('Failed to create artifact.', error);
     return res.status(500).json({ ok: false, error: 'Failed to create artifact' });
   }
 });
 
 app.post('/api/artifacts/:id/versions', async (req, res) => {
+  let artifactId = '';
+  let userId = '';
   try {
     const session = await getSessionFromRequest(req);
     if (!session) {
@@ -532,6 +572,8 @@ app.post('/api/artifacts/:id/versions', async (req, res) => {
     if (!artifact) {
       return res.status(404).json({ ok: false, error: 'Artifact not found' });
     }
+    artifactId = artifact.artifact_id;
+    userId = artifact.owner_user_id;
     if (artifact.owner_user_id !== session.sub) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
@@ -591,8 +633,22 @@ app.post('/api/artifacts/:id/versions', async (req, res) => {
       sessionId: sourceSession?.session_id || ''
     });
 
+    logStructured('info', 'artifact_version_created', {
+      user_id: artifact.owner_user_id,
+      artifact_id: artifact.artifact_id,
+      source_artifact_id: artifact.derived_from?.artifact_id || null,
+      session_id: sourceSession?.session_id || '',
+      visibility,
+      outcome: 'success'
+    });
+
     return res.json({ ok: true, artifact: updated });
   } catch (error) {
+    logStructured('error', 'artifact_version_create_failed', {
+      user_id: userId || null,
+      artifact_id: artifactId || null,
+      error: error?.message || 'unknown_error'
+    });
     console.error('Failed to create artifact version.', error);
     return res.status(500).json({ ok: false, error: 'Failed to create artifact version' });
   }
@@ -843,6 +899,8 @@ app.get('/api/artifacts/:id', async (req, res) => {
 });
 
 app.post('/api/artifacts/:id/fork', async (req, res) => {
+  let sourceArtifactId = '';
+  let userId = '';
   try {
     const session = await getSessionFromRequest(req);
     if (!session) {
@@ -852,10 +910,12 @@ app.post('/api/artifacts/:id/fork', async (req, res) => {
     if (!user) {
       return res.status(404).json({ ok: false, error: 'User not found' });
     }
+    userId = user.user_id;
     const source = await fetchArtifactById(req.params.id);
     if (!source) {
       return res.status(404).json({ ok: false, error: 'Artifact not found' });
     }
+    sourceArtifactId = source.artifact_id;
     if (source.visibility !== 'public' && source.owner_user_id !== session.sub) {
       return res.status(403).json({ ok: false, error: 'Forbidden' });
     }
@@ -898,8 +958,21 @@ app.post('/api/artifacts/:id/fork', async (req, res) => {
       sessionId: forked.source_session.session_id || ''
     });
 
+    logStructured('info', 'artifact_forked', {
+      user_id: user.user_id,
+      artifact_id: forked.artifact_id,
+      source_artifact_id: source.artifact_id,
+      session_id: forked.source_session?.session_id || '',
+      outcome: 'success'
+    });
+
     return res.json({ ok: true, artifact: forked });
   } catch (error) {
+    logStructured('error', 'artifact_fork_failed', {
+      user_id: userId || null,
+      artifact_id: sourceArtifactId || null,
+      error: error?.message || 'unknown_error'
+    });
     console.error('Failed to fork artifact.', error);
     return res.status(500).json({ ok: false, error: 'Failed to fork artifact' });
   }
@@ -2020,22 +2093,65 @@ app.get('/checkout/credits', async (req, res) => {
 });
 
 app.post('/api/stripe/webhook', async (req, res) => {
+  let stripeEventId = '';
   try {
     const signature = req.header('stripe-signature');
     if (!signature) {
       return res.status(400).json({ ok: false, error: 'Missing stripe-signature' });
     }
 
+    const rawBody = req.body.toString();
     const event = verifyStripeSignature({
-      rawBody: req.body.toString(),
+      rawBody,
       signatureHeader: signature,
       webhookSecret: process.env.STRIPE_WEBHOOK_SECRET
     });
 
+    stripeEventId = event.id || '';
+    const userId = await resolveStripeEventUserId(event);
+    const payloadHash = computePayloadHash(rawBody);
+    const recordResult = await recordBillingEvent({
+      stripeEventId,
+      type: event.type,
+      userId,
+      status: 'received',
+      payloadHash
+    });
+    if (!recordResult.inserted && !recordResult.skipped) {
+      logStructured('info', 'stripe_webhook_duplicate', {
+        stripe_event_id: stripeEventId,
+        user_id: userId,
+        type: event.type,
+        outcome: 'duplicate'
+      });
+      return res.json({ received: true, duplicate: true });
+    }
+
     await handleStripeEvent(event);
+    await updateBillingEventStatus({
+      stripeEventId,
+      status: 'processed',
+      userId
+    });
+    logStructured('info', 'stripe_webhook_processed', {
+      stripe_event_id: stripeEventId,
+      user_id: userId,
+      type: event.type,
+      outcome: 'processed'
+    });
 
     return res.json({ received: true });
   } catch (error) {
+    if (stripeEventId) {
+      await updateBillingEventStatus({
+        stripeEventId,
+        status: 'failed'
+      });
+    }
+    logStructured('error', 'stripe_webhook_failed', {
+      stripe_event_id: stripeEventId || null,
+      error: error?.message || 'unknown_error'
+    });
     console.error('Stripe webhook failed.', error);
     return res.status(400).json({ ok: false, error: 'Webhook failed' });
   }
@@ -3135,6 +3251,27 @@ function verifyStripeSignature({ rawBody, signatureHeader, webhookSecret }) {
     throw new Error('Timestamp outside tolerance');
   }
   return JSON.parse(rawBody);
+}
+
+async function resolveStripeEventUserId(event) {
+  const payload = event?.data?.object;
+  if (!payload) return null;
+
+  if (event?.type === 'checkout.session.completed') {
+    return payload.metadata?.user_id || payload.client_reference_id || null;
+  }
+
+  if (event?.type?.startsWith('customer.subscription.')) {
+    const user = await findUserByStripeCustomer(payload.customer);
+    return user?.user_id || null;
+  }
+
+  if (event?.type?.startsWith('invoice.')) {
+    const user = await findUserByStripeCustomer(payload.customer);
+    return user?.user_id || null;
+  }
+
+  return null;
 }
 
 async function handleStripeEvent(event) {
