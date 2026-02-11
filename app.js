@@ -3773,7 +3773,7 @@ async function createArtifact(payload) {
 }
 
 async function createArtifactVersion(artifactId, payload) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/versions`, {
+  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/version`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -3957,12 +3957,14 @@ function openArtifactVersionsModal(artifactId) {
       });
     };
 
-    const renderVersionDetail = (version) => {
+    const versionCache = new Map();
+
+    const renderVersionDetail = (version, diffBaseContent = currentContent, diffLabel = 'current') => {
       if (!detailEl || !version) {
         return;
       }
       const label = version.label || `v${version.version_number || 1}`;
-      const diffHtml = renderArtifactDiff(currentContent, version.code?.content || '');
+      const diffHtml = renderArtifactDiff(diffBaseContent, version.code?.content || '');
       const chatHtml = version.chat?.included
         ? renderArtifactChatHistory(version.chat.messages || [])
         : '<div class="artifact-chat-empty">No chat history available.</div>';
@@ -3978,7 +3980,7 @@ function openArtifactVersionsModal(artifactId) {
           </div>
         </div>
         <div class="artifact-version-section">
-          <h4>Diff vs current</h4>
+          <h4>Diff vs ${escapeHtml(diffLabel)}</h4>
           <div class="artifact-diff">${diffHtml}</div>
         </div>
         <div class="artifact-version-section">
@@ -4022,8 +4024,16 @@ function openArtifactVersionsModal(artifactId) {
           detailEl.innerHTML = '<div class="artifact-version-empty">Version not found.</div>';
           return;
         }
+        versionCache.set(versionId, version);
+        const sortedVersions = [...versions].sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
+        const currentIndex = sortedVersions.findIndex((entry) => entry.version_id === versionId);
+        const previousVersion = currentIndex >= 0 ? sortedVersions[currentIndex + 1] : null;
+        const baseCandidate = previousVersion ? versionCache.get(previousVersion.version_id) : null;
+        const baseContent = baseCandidate?.code?.content || currentContent;
+        const baseLabel = baseCandidate?.label
+          || (previousVersion?.label || (previousVersion ? `v${previousVersion.version_number || 1}` : 'current'));
         setActiveRow(versionId);
-        renderVersionDetail(version);
+        renderVersionDetail(version, baseContent, previousVersion ? baseLabel : 'current');
       }).catch((error) => {
         console.error('Failed to load version.', error);
         detailEl.innerHTML = '<div class="artifact-version-empty">Unable to load version.</div>';

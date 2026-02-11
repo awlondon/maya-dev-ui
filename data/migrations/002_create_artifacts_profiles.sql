@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   forked_from_owner_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   forked_from_version_id uuid,
   forked_from_version_label text,
+  origin_artifact_id uuid REFERENCES artifacts(id) ON DELETE SET NULL,
+  origin_owner_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   forks_count int NOT NULL DEFAULT 0,
   imports_count int NOT NULL DEFAULT 0,
   likes_count int NOT NULL DEFAULT 0,
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS artifacts_owner_visibility_idx ON artifacts (owner_user_id, visibility);
 CREATE INDEX IF NOT EXISTS artifacts_visibility_updated_idx ON artifacts (visibility, updated_at DESC);
 CREATE INDEX IF NOT EXISTS artifacts_forked_from_idx ON artifacts (forked_from_owner_user_id);
+CREATE INDEX IF NOT EXISTS artifacts_origin_idx ON artifacts (origin_artifact_id);
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
   id uuid PRIMARY KEY,
@@ -53,11 +56,15 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   code_content text,
   code_versions jsonb,
   chat jsonb,
-  stats jsonb
+  stats jsonb,
+  version_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  code_references jsonb NOT NULL DEFAULT '[]'::jsonb,
+  parent_version_id uuid REFERENCES artifact_versions(id) ON DELETE SET NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS artifact_versions_unique_idx ON artifact_versions (artifact_id, version_index);
 CREATE INDEX IF NOT EXISTS artifact_versions_artifact_idx ON artifact_versions (artifact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS artifact_versions_parent_idx ON artifact_versions (parent_version_id);
 
 CREATE TABLE IF NOT EXISTS artifact_media (
   artifact_id uuid PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,

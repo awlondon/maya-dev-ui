@@ -19,6 +19,8 @@ test('mapArtifactRow shapes artifact payload', () => {
     forked_from_owner_user_id: 'user-0',
     forked_from_version_id: 'version-0',
     forked_from_version_label: 'v1',
+    origin_artifact_id: 'artifact-root',
+    origin_owner_user_id: 'user-root',
     forks_count: 2,
     imports_count: 3,
     likes_count: 4,
@@ -35,6 +37,7 @@ test('mapArtifactRow shapes artifact payload', () => {
   assert.equal(artifact?.code.content, '<div />');
   assert.equal(artifact?.screenshot_url, row.screenshot_url);
   assert.equal(artifact?.derived_from.artifact_id, row.forked_from_id);
+  assert.equal(artifact?.derived_from.original_artifact_id, row.origin_artifact_id);
   assert.equal(artifact?.stats.forks, 2);
   assert.equal(artifact?.versioning.enabled, true);
 });
@@ -52,13 +55,18 @@ test('mapArtifactVersionRow shapes version payload', () => {
     code_content: '<div />',
     code_versions: [{ language: 'html', content: '<div />' }],
     chat: { included: true, messages: [] },
-    stats: { turns: 0 }
+    stats: { turns: 0 },
+    version_metadata: { visibility: 'private' },
+    code_references: [{ ref: 'inline:version-1' }],
+    parent_version_id: 'version-0'
   };
 
   const version = mapArtifactVersionRow(row);
   assert.equal(version?.version_id, 'version-1');
   assert.equal(version?.version_index, 1);
   assert.equal(version?.code.language, 'html');
+  assert.equal(version?.metadata.visibility, 'private');
+  assert.equal(version?.parent_version_id, 'version-0');
 });
 
 test('mapProfileRow shapes profile payload', () => {
