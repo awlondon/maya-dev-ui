@@ -665,11 +665,39 @@ async function handleUsageAnalytics(request, env, ctx) {
   });
 }
 
-async function revokeCurrentSession(request, env) {
-  const session = await getSession(request, env);
-  const auth = requireAuth(session);
-  if (!auth.ok) {
-    return auth.response;
+async function upsertUserBillingState(env, userId, patch) {
+  try {
+    return await upsertUserToStore(env, userId, patch);
+  } catch (error) {
+    if (String(error?.message || '').includes('GitHub user writes are disabled')) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function findUserIdByStripeCustomer(env, stripeCustomerId) {
+  return findUserIdByStripeCustomerInStore(env, stripeCustomerId);
+}
+
+async function getUserFromStore(env, userId) {
+  const { rows } = await readUsersCSV(env);
+  return rows.find((row) => row.user_id === userId) || null;
+}
+
+async function upsertUserToStore(env, userId, patch) {
+  assertLegacyUserStoreEnabled(env);
+  if (env.GITHUB_USER_WRITES_ENABLED !== 'true') {
+    throw new Error('GitHub user writes are disabled. Persist billing state in Postgres.');
+  }
+  const repo = env.GITHUB_REPO;
+  const branch = env.GITHUB_BRANCH || 'main';
+
+  const { sha, rows } = await readUsersCSV(env);
+
+  const user = rows.find((row) => row.user_id === userId);
+  if (!user) {
+    throw new Error(`User ${userId} not found`);
   }
 
   if (session?.jti) {
