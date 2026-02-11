@@ -1,3 +1,5 @@
+import { normalizeRole, requireAuth, requireRole, resolveRoleForUser } from './auth/middleware.js';
+
 const PLAN_BY_PRICE_ID = {
   // "price_123": { tier: "starter", monthly_credits: 5000 },
   // "price_456": { tier: "pro", monthly_credits: 20000 },
@@ -28,9 +30,11 @@ const REQUIRED_USER_HEADERS = [
   'stripe_customer_id',
   'stripe_subscription_id',
   'billing_status'
+  ,'role'
 ];
 const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 const MAILCHANNELS_ENDPOINT = 'https://api.mailchannels.net/tx/v1/send';
+const SESSION_REVOCATION_TTL_SECONDS = 60 * 60 * 24 * 35;
 
 function isDevEnv(env) {
   const label = env?.ENVIRONMENT || env?.ENV || env?.NODE_ENV;
@@ -60,6 +64,8 @@ export default {
       : url.pathname;
 
     if (pathname === '/auth/magic/request' && request.method === 'POST') {
+      const limit = await enforceAuthRateLimit(request, env, 'magic');
+      if (limit) return limit;
       return requestMagicLink(request, env);
     }
 
@@ -68,7 +74,13 @@ export default {
     }
 
     if (pathname === '/auth/google' && request.method === 'POST') {
+      const limit = await enforceAuthRateLimit(request, env, 'google');
+      if (limit) return limit;
       return handleGoogleAuth(request, env);
+    }
+
+    if (pathname === '/auth/session/revoke' && request.method === 'POST') {
+      return revokeCurrentSession(request, env);
     }
 
     if (pathname === '/me') {
@@ -501,72 +513,29 @@ async function verifyMagicLink(request, env) {
 
   await env.AUTH_KV.delete(`magic:${hash}`);
 
-  const user = {
-    id: `email:${record.email}`,
-    email: record.email,
-    provider: 'email'
-  };
-
-  return issueSession(user, env, request);
-}
-
-async function hashToken(token) {
-  const data = new TextEncoder().encode(token);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return bufToHex(digest);
-}
-
-async function sendMagicEmail(email, token, env, requestOrigin) {
-  if (!env.MAGIC_EMAIL_FROM) {
-    console.warn('MAGIC_EMAIL_FROM is not configured; skipping email send.');
-    return;
-  }
-
-  const base = env.MAGIC_LINK_BASE || requestOrigin;
-  const link = `${base.replace(/\/$/, '')}/auth/magic?token=${encodeURIComponent(token)}`;
-  const subject = 'Sign in to Maya Dev UI';
-  const bodyText = `Click the link below to sign in:\n\n${link}\n\nThis link expires in 15 minutes.\nIf you didn’t request this, you can ignore this email.`;
-
-  const payload = {
-    personalizations: [
-      {
-        to: [{ email }]
-      }
-    ],
-    from: {
-      email: env.MAGIC_EMAIL_FROM,
-      name: env.MAGIC_EMAIL_FROM_NAME || 'Maya Dev UI'
-    },
-    subject,
-    content: [
-      {
-        type: 'text/plain',
-        value: bodyText
-      }
-    ]
-  };
-
-  const response = await fetch(MAILCHANNELS_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Mail send failed: ${response.status} ${text}`);
-  }
+function parseEnvOriginList(raw = '') {
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 async function issueSession(user, env, request) {
   if (!env.SESSION_SECRET) {
     return jsonError('Missing SESSION_SECRET', 500);
   }
+  const role = resolveRole(user, env);
+  const jti = crypto.randomUUID();
+  const sessionVersion = Number(user?.session_version || 1);
   const token = await signJwt(
     {
       sub: user.id,
       email: user.email,
       provider: user.provider,
+      role,
+      jti,
+      session_version: Number.isFinite(sessionVersion) ? sessionVersion : 1,
+      exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
       iat: Math.floor(Date.now() / 1000)
     },
     env.SESSION_SECRET
@@ -576,8 +545,16 @@ async function issueSession(user, env, request) {
     'Path=/',
     'HttpOnly',
     'Secure',
-    'SameSite=None'
+    'SameSite=Lax',
+    `Max-Age=${SESSION_MAX_AGE_SECONDS}`
   ];
+
+  await persistSessionRecord(env, {
+    jti,
+    userId: user.id,
+    role,
+    expirationTtl: SESSION_MAX_AGE_SECONDS
+  });
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
@@ -588,43 +565,11 @@ async function issueSession(user, env, request) {
   });
 }
 
-function getCookieValue(cookieHeader, name) {
-  if (!cookieHeader) {
-    return null;
-  }
-  const cookies = cookieHeader.split(';');
-  for (const entry of cookies) {
-    const [key, ...rest] = entry.trim().split('=');
-    if (key === name) {
-      return rest.join('=');
-    }
-  }
-  return null;
-}
-
-function timingSafeEqualString(a, b) {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return out === 0;
-}
-
-async function verifySessionToken(token, secret) {
-  const decoded = decodeJwtParts(token);
-  if (!decoded) return null;
-  const expectedSignature = await hmacSHA256Base64Url(secret, decoded.signingInput);
-  if (!timingSafeEqualString(expectedSignature, decoded.signature)) {
-    return null;
-  }
-  return decoded.payload;
-}
-
-async function getSessionFromRequest(request, env) {
-  const session = await getSession(request, env);
-  return session?.user || null;
-}
+function corsHeaders(request, env) {
+  const origin = request.headers.get('Origin') || '';
+  const allowOrigin = allowedOrigins(env).includes(origin)
+    ? origin
+    : DEFAULT_ALLOWED_ORIGINS[0];
 
 async function getSession(request, env) {
   const token = getCookieValue(request.headers.get('cookie'), SESSION_COOKIE_NAME);
@@ -635,13 +580,22 @@ async function getSession(request, env) {
   if (!payload) {
     return null;
   }
+  if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+    return null;
+  }
+  if (await isSessionRevoked(env, payload.jti)) {
+    return null;
+  }
   return {
     token,
     user: {
       id: payload.sub,
       email: payload.email,
-      provider: payload.provider
-    }
+      provider: payload.provider,
+      role: normalizeRole(payload.role)
+    },
+    jti: payload.jti,
+    session_version: payload.session_version || 1
   };
 }
 
@@ -655,13 +609,30 @@ async function handleUsageAnalytics(request, env, ctx) {
     ? Math.min(Math.floor(parsedDays), MAX_ANALYTICS_DAYS)
     : DEFAULT_ANALYTICS_DAYS;
 
-  // TODO: auth check here (admin vs user)
-  // if scope=admin, ensure caller is admin
+  const session = await getSession(request, env);
+  const auth = requireAuth(session);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   if (scope !== 'user' && scope !== 'admin') {
     return json({ error: 'Invalid scope' }, 400);
   }
 
-  const cacheKey = `analytics:${userId || 'all'}:${days}`;
+  if (scope === 'admin') {
+    const roleCheck = requireRole(session, 'admin');
+    if (!roleCheck.ok) {
+      return roleCheck.response;
+    }
+  }
+
+  if (scope === 'user' && userId && userId !== session.user.id) {
+    return json({ error: 'Forbidden' }, 403);
+  }
+
+  const effectiveUserId = scope === 'admin' ? (userId || null) : (userId || session.user.id);
+
+  const cacheKey = `analytics:${scope}:${effectiveUserId || 'all'}:${days}`;
   if (env.ANALYTICS_CACHE) {
     const cached = await env.ANALYTICS_CACHE.get(cacheKey);
     if (cached) {
@@ -673,11 +644,13 @@ async function handleUsageAnalytics(request, env, ctx) {
   }
 
   const rows = await readUsageLogRows(env);
-  const filtered = filterRows(rows, { userId, days });
+  const filtered = filterRows(rows, { userId: effectiveUserId, days });
   const analytics = computeAnalytics(filtered);
 
   const payload = JSON.stringify({
     range_days: days,
+    scope,
+    user_id: effectiveUserId,
     generated_at: new Date().toISOString(),
     ...analytics
   });
@@ -691,6 +664,111 @@ async function handleUsageAnalytics(request, env, ctx) {
     headers: { 'content-type': 'application/json' }
   });
 }
+
+async function revokeCurrentSession(request, env) {
+  const session = await getSession(request, env);
+  const auth = requireAuth(session);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
+  if (session?.jti) {
+    await revokeSessionJti(env, session.jti);
+  }
+
+  return new Response(JSON.stringify({ ok: true, revoked: Boolean(session?.jti) }), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'set-cookie': `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Expires=Thu, 01 Jan 1970 00:00:00 GMT`
+    }
+  });
+}
+
+function splitEmailList(value) {
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function resolveRole(user, env) {
+  return resolveRoleForUser(user, {
+    adminEmails: splitEmailList(env.ADMIN_EMAILS),
+    internalEmails: splitEmailList(env.INTERNAL_EMAILS)
+  });
+}
+
+async function persistSessionRecord(env, { jti, userId, role, expirationTtl }) {
+  if (!jti || !env.AUTH_KV) {
+    return;
+  }
+  await env.AUTH_KV.put(
+    `session:${jti}`,
+    JSON.stringify({ user_id: userId, role, issued_at: Date.now() }),
+    { expirationTtl }
+  );
+}
+
+async function revokeSessionJti(env, jti) {
+  if (!jti || !env.AUTH_KV) {
+    return;
+  }
+  await env.AUTH_KV.put(`revoked_jti:${jti}`, '1', { expirationTtl: SESSION_REVOCATION_TTL_SECONDS });
+  await env.AUTH_KV.delete(`session:${jti}`);
+}
+
+async function isSessionRevoked(env, jti) {
+  if (!jti || !env.AUTH_KV) {
+    return false;
+  }
+  const revoked = await env.AUTH_KV.get(`revoked_jti:${jti}`);
+  return Boolean(revoked);
+}
+
+async function enforceAuthRateLimit(request, env, route) {
+  if (!env.MY_RATE_LIMITER || typeof env.MY_RATE_LIMITER.limit !== 'function') {
+    return null;
+  }
+
+  const key = await buildRateLimitKey(request, route);
+  const configuredLimit = Number(env[`AUTH_RATE_LIMIT_${route.toUpperCase()}`]);
+  const response = await env.MY_RATE_LIMITER.limit({
+    key,
+    ...(Number.isFinite(configuredLimit) ? { limit: configuredLimit } : {})
+  });
+
+  if (response?.success === false) {
+    return json({ ok: false, error: 'Too many requests' }, 429);
+  }
+
+  return null;
+}
+
+async function buildRateLimitKey(request, route) {
+  const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
+
+  if (route === 'magic') {
+    let email = '';
+    try {
+      const body = await request.clone().json();
+      email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
+    } catch {
+      email = '';
+    }
+    return `auth:magic:${email || ip}`;
+  }
+
+  return `auth:${route}:${ip}`;
+}
+
+export const __test = {
+  resolveRole,
+  buildRateLimitKey,
+  enforceAuthRateLimit,
+  revokeSessionJti,
+  isSessionRevoked
+};
 
 async function onCheckoutSessionCompleted(session, env) {
   const userId = session.metadata?.user_id || session.client_reference_id;
@@ -894,108 +972,55 @@ async function readUsageLogRows(env) {
   return parseCSV(csv);
 }
 
-function filterRows(rows, { userId, days }) {
-  const cutoff = new Date();
-  cutoff.setUTCDate(cutoff.getUTCDate() - days);
-
-  return rows.filter((row) => {
-    if (userId && row.user_id !== userId) return false;
-    if (!row.timestamp_utc) return false;
-    return new Date(row.timestamp_utc) >= cutoff;
+function withCors(response, headers) {
+  const nextHeaders = new Headers(response.headers);
+  Object.entries(headers).forEach(([key, value]) => nextHeaders.set(key, value));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: nextHeaders
   });
 }
 
-function computeAnalytics(rows) {
-  const dailyMap = {};
-  let totalCredits = 0;
-  let totalLatency = 0;
-  let successCount = 0;
+export default {
+  async fetch(request, env) {
+    const baseCorsHeaders = corsHeaders(request, env);
 
-  for (const row of rows) {
-    if (!row.timestamp_utc) {
-      continue;
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: baseCorsHeaders
+      });
     }
 
-    const date = row.timestamp_utc.slice(0, 10);
-
-    if (!dailyMap[date]) {
-      dailyMap[date] = {
-        date,
-        requests: 0,
-        credits: 0,
-        latency_sum: 0,
-        success: 0,
-        by_intent: {}
-      };
+    let origin;
+    try {
+      origin = canonicalApiOrigin(env);
+    } catch (error) {
+      return withCors(
+        new Response(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'Bad gateway' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' }
+        }),
+        baseCorsHeaders
+      );
     }
 
-    const day = dailyMap[date];
-    day.requests += 1;
+    const url = new URL(request.url);
+    const upstreamPath = normalizePathname(url.pathname);
+    const upstreamUrl = new URL(`${origin}${upstreamPath}${url.search}`);
 
-    const credits = Number(row.credits_charged || 0);
-    const latency = Number(row.latency_ms || 0);
+    const headers = new Headers(request.headers);
+    headers.set('x-forwarded-host', url.host);
+    headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
-    day.credits += credits;
-    day.latency_sum += latency;
-
-    if (row.status === 'success') {
-      day.success += 1;
-      successCount += 1;
-    }
-
-    if (row.intent_type) {
-      day.by_intent[row.intent_type] = (day.by_intent[row.intent_type] || 0) + 1;
-    }
-
-    totalCredits += credits;
-    totalLatency += latency;
-  }
-
-  const daily = Object.values(dailyMap)
-    .map((day) => ({
-      date: day.date,
-      requests: day.requests,
-      credits: day.credits,
-      avg_latency_ms: day.requests ? Math.round(day.latency_sum / day.requests) : 0,
-      by_intent: day.by_intent
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  return {
-    summary: {
-      total_requests: rows.length,
-      total_credits: totalCredits,
-      avg_latency_ms: rows.length ? Math.round(totalLatency / rows.length) : 0,
-      success_rate: rows.length ? Number((successCount / rows.length).toFixed(2)) : 0
-    },
-    daily
-  };
-}
-
-function parseCSV(csvText) {
-  const trimmed = csvText.trim();
-  if (!trimmed) {
-    return [];
-  }
-  const lines = trimmed.split('\n');
-  const headers = lines.shift().split(',');
-
-  return lines.map((line) => {
-    const values = line.split(',');
-    const obj = {};
-    headers.forEach((header, index) => {
-      obj[header] = values[index] ?? '';
+    const upstreamResponse = await fetch(upstreamUrl.toString(), {
+      method: request.method,
+      headers,
+      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
+      redirect: 'manual'
     });
-    return obj;
-  });
-}
 
-function serializeCSV(rows) {
-  const headers = REQUIRED_USER_HEADERS;
-  const lines = [
-    headers.join(','),
-    ...rows.map((row) => headers.map((header) => String(row[header] ?? '')).join(','))
-  ];
-
-  return lines.join('\n') + '\n';
-}
+    return withCors(upstreamResponse, baseCorsHeaders);
+  }
+};
