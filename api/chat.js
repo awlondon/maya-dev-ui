@@ -1,10 +1,31 @@
+import { buildPlayablePrompt } from '../server/utils/playableWrapper.js';
+
+function applyPlayableWrapper(messages, { userPrompt = '', code = '' } = {}) {
+  const wrappedPrompt = buildPlayablePrompt({ prompt: userPrompt, code });
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return [{ role: 'user', content: wrappedPrompt }];
+  }
+
+  const next = [...messages];
+  const lastIndex = next.length - 1;
+  if (next[lastIndex]?.role === 'user') {
+    next[lastIndex] = {
+      ...next[lastIndex],
+      content: wrappedPrompt
+    };
+  } else {
+    next.push({ role: 'user', content: wrappedPrompt });
+  }
+  return next;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
 
-  const { messages } = req.body || {};
+  const { messages, playableMode = false, userPrompt = '', currentCode = '' } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     res.status(400).json({ error: 'Missing messages.' });
     return;
@@ -17,6 +38,10 @@ export default async function handler(req, res) {
   }
 
   try {
+    const outboundMessages = playableMode
+      ? applyPlayableWrapper(messages, { userPrompt, code: currentCode })
+      : messages;
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -25,7 +50,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'gpt-4.1-mini',
-        messages,
+        messages: outboundMessages,
         stream: false
       })
     });
