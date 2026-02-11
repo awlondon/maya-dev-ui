@@ -2,6 +2,7 @@
 
 import { createSandboxController } from './sandboxController.js';
 import { formatNumber } from './utils/formatNumber.js';
+import { editorManager } from './editorManager.js';
 
 if (!window.GOOGLE_CLIENT_ID) {
   console.warn('Missing GOOGLE_CLIENT_ID. Google auth disabled.');
@@ -562,18 +563,8 @@ async function initializeCodeEditor({ value, language }) {
   if (editorApi) {
     return;
   }
-  if (!window.__monacoReady) {
-    await new Promise((resolve) => {
-      const handleReady = () => {
-        resolve();
-      };
-      window.addEventListener('monaco:ready', handleReady, { once: true });
-    });
-  }
-  if (typeof window.mountEditor !== 'function') {
-    throw new Error('mountEditor is not available.');
-  }
-  editorApi = window.mountEditor('code-editor', {
+  await editorManager.whenReady();
+  editorApi = await editorManager.mount('code-editor', {
     value,
     language,
     theme: 'vs-dark',
@@ -675,40 +666,8 @@ function getSystemPromptForIntent(resolvedIntent) {
 
 const SESSION_BRIDGE_MARKER = '<!-- MAYA_SESSION_BRIDGE -->';
 const SESSION_BRIDGE_SCRIPT = `${SESSION_BRIDGE_MARKER}
-<script>
-  function mountEditor(containerId, value, language = "javascript") {
-    if (!window.__monacoReady) {
-      console.warn("Monaco not ready yet");
-      return;
-    }
-
-    const el = document.getElementById(containerId);
-    if (!el) {
-      console.warn("Editor container not found:", containerId);
-      return;
-    }
-
-    if (el.__editorInstance) {
-      el.__editorInstance.dispose();
-    }
-
-    el.__editorInstance = monaco.editor.create(el, {
-      value,
-      language,
-      theme: "vs-dark",
-      automaticLayout: true
-    });
-  }
-
-  function tryMountEditor() {
-    mountEditor("editor", "// hello");
-  }
-
-  document.addEventListener("DOMContentLoaded", tryMountEditor);
-  window.addEventListener("monaco:ready", tryMountEditor);
-</script>
-
 <script id="dev-session-bridge">
+
   window.__SESSION__ = window.__SESSION__ || null;
   window.addEventListener('message', (event) => {
     if (event.data?.type === 'SESSION') {

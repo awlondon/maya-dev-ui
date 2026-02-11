@@ -49,7 +49,9 @@ If you host the UI on a static site, keep the API key on the server (for example
 
 ## Monaco loading note
 
-Monaco is loaded via the AMD loader (`vs/loader.js`) only. Do not add script tags for `editor.main.js` or `editor.main.nls.js`.
+Monaco is loaded via AMD only through `editorManager.js`, which manages a singleton loader bootstrap and mount/unmount lifecycle for editors. Do not import `editor.main.js`/`editor.main.css` directly or inject additional Monaco script tags at runtime.
+
+If you add a Vite build, keep Monaco externalized in `vite.config.js` (`external: ["monaco-editor"]`) so the CDN AMD runtime remains the single source of Monaco modules.
 
 ## Documentation
 
