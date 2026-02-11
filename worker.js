@@ -1,3 +1,5 @@
+import { normalizeRole, requireAuth, requireRole, resolveRoleForUser } from './auth/middleware.js';
+
 const PLAN_BY_PRICE_ID = {
   // "price_123": { tier: "starter", monthly_credits: 5000 },
   // "price_456": { tier: "pro", monthly_credits: 20000 },
@@ -28,9 +30,11 @@ const REQUIRED_USER_HEADERS = [
   'stripe_customer_id',
   'stripe_subscription_id',
   'billing_status'
+  ,'role'
 ];
 const MAGIC_LINK_TTL_SECONDS = 15 * 60;
 const MAILCHANNELS_ENDPOINT = 'https://api.mailchannels.net/tx/v1/send';
+const SESSION_REVOCATION_TTL_SECONDS = 60 * 60 * 24 * 35;
 
 function isDevEnv(env) {
   const label = env?.ENVIRONMENT || env?.ENV || env?.NODE_ENV;
@@ -45,6 +49,8 @@ export default {
       : url.pathname;
 
     if (pathname === '/auth/magic/request' && request.method === 'POST') {
+      const limit = await enforceAuthRateLimit(request, env, 'magic');
+      if (limit) return limit;
       return requestMagicLink(request, env);
     }
 
@@ -53,7 +59,13 @@ export default {
     }
 
     if (pathname === '/auth/google' && request.method === 'POST') {
+      const limit = await enforceAuthRateLimit(request, env, 'google');
+      if (limit) return limit;
       return handleGoogleAuth(request, env);
+    }
+
+    if (pathname === '/auth/session/revoke' && request.method === 'POST') {
+      return revokeCurrentSession(request, env);
     }
 
     if (pathname === '/me') {
@@ -547,11 +559,18 @@ async function issueSession(user, env, request) {
   if (!env.SESSION_SECRET) {
     return jsonError('Missing SESSION_SECRET', 500);
   }
+  const role = resolveRole(user, env);
+  const jti = crypto.randomUUID();
+  const sessionVersion = Number(user?.session_version || 1);
   const token = await signJwt(
     {
       sub: user.id,
       email: user.email,
       provider: user.provider,
+      role,
+      jti,
+      session_version: Number.isFinite(sessionVersion) ? sessionVersion : 1,
+      exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
       iat: Math.floor(Date.now() / 1000)
     },
     env.SESSION_SECRET
@@ -561,8 +580,16 @@ async function issueSession(user, env, request) {
     'Path=/',
     'HttpOnly',
     'Secure',
-    'SameSite=None'
+    'SameSite=Lax',
+    `Max-Age=${SESSION_MAX_AGE_SECONDS}`
   ];
+
+  await persistSessionRecord(env, {
+    jti,
+    userId: user.id,
+    role,
+    expirationTtl: SESSION_MAX_AGE_SECONDS
+  });
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
@@ -620,13 +647,22 @@ async function getSession(request, env) {
   if (!payload) {
     return null;
   }
+  if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+    return null;
+  }
+  if (await isSessionRevoked(env, payload.jti)) {
+    return null;
+  }
   return {
     token,
     user: {
       id: payload.sub,
       email: payload.email,
-      provider: payload.provider
-    }
+      provider: payload.provider,
+      role: normalizeRole(payload.role)
+    },
+    jti: payload.jti,
+    session_version: payload.session_version || 1
   };
 }
 
@@ -640,13 +676,30 @@ async function handleUsageAnalytics(request, env, ctx) {
     ? Math.min(Math.floor(parsedDays), MAX_ANALYTICS_DAYS)
     : DEFAULT_ANALYTICS_DAYS;
 
-  // TODO: auth check here (admin vs user)
-  // if scope=admin, ensure caller is admin
+  const session = await getSession(request, env);
+  const auth = requireAuth(session);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
   if (scope !== 'user' && scope !== 'admin') {
     return json({ error: 'Invalid scope' }, 400);
   }
 
-  const cacheKey = `analytics:${userId || 'all'}:${days}`;
+  if (scope === 'admin') {
+    const roleCheck = requireRole(session, 'admin');
+    if (!roleCheck.ok) {
+      return roleCheck.response;
+    }
+  }
+
+  if (scope === 'user' && userId && userId !== session.user.id) {
+    return json({ error: 'Forbidden' }, 403);
+  }
+
+  const effectiveUserId = scope === 'admin' ? (userId || null) : (userId || session.user.id);
+
+  const cacheKey = `analytics:${scope}:${effectiveUserId || 'all'}:${days}`;
   if (env.ANALYTICS_CACHE) {
     const cached = await env.ANALYTICS_CACHE.get(cacheKey);
     if (cached) {
@@ -658,11 +711,13 @@ async function handleUsageAnalytics(request, env, ctx) {
   }
 
   const rows = await readUsageLogRows(env);
-  const filtered = filterRows(rows, { userId, days });
+  const filtered = filterRows(rows, { userId: effectiveUserId, days });
   const analytics = computeAnalytics(filtered);
 
   const payload = JSON.stringify({
     range_days: days,
+    scope,
+    user_id: effectiveUserId,
     generated_at: new Date().toISOString(),
     ...analytics
   });
@@ -676,6 +731,111 @@ async function handleUsageAnalytics(request, env, ctx) {
     headers: { 'content-type': 'application/json' }
   });
 }
+
+async function revokeCurrentSession(request, env) {
+  const session = await getSession(request, env);
+  const auth = requireAuth(session);
+  if (!auth.ok) {
+    return auth.response;
+  }
+
+  if (session?.jti) {
+    await revokeSessionJti(env, session.jti);
+  }
+
+  return new Response(JSON.stringify({ ok: true, revoked: Boolean(session?.jti) }), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'set-cookie': `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Expires=Thu, 01 Jan 1970 00:00:00 GMT`
+    }
+  });
+}
+
+function splitEmailList(value) {
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function resolveRole(user, env) {
+  return resolveRoleForUser(user, {
+    adminEmails: splitEmailList(env.ADMIN_EMAILS),
+    internalEmails: splitEmailList(env.INTERNAL_EMAILS)
+  });
+}
+
+async function persistSessionRecord(env, { jti, userId, role, expirationTtl }) {
+  if (!jti || !env.AUTH_KV) {
+    return;
+  }
+  await env.AUTH_KV.put(
+    `session:${jti}`,
+    JSON.stringify({ user_id: userId, role, issued_at: Date.now() }),
+    { expirationTtl }
+  );
+}
+
+async function revokeSessionJti(env, jti) {
+  if (!jti || !env.AUTH_KV) {
+    return;
+  }
+  await env.AUTH_KV.put(`revoked_jti:${jti}`, '1', { expirationTtl: SESSION_REVOCATION_TTL_SECONDS });
+  await env.AUTH_KV.delete(`session:${jti}`);
+}
+
+async function isSessionRevoked(env, jti) {
+  if (!jti || !env.AUTH_KV) {
+    return false;
+  }
+  const revoked = await env.AUTH_KV.get(`revoked_jti:${jti}`);
+  return Boolean(revoked);
+}
+
+async function enforceAuthRateLimit(request, env, route) {
+  if (!env.MY_RATE_LIMITER || typeof env.MY_RATE_LIMITER.limit !== 'function') {
+    return null;
+  }
+
+  const key = await buildRateLimitKey(request, route);
+  const configuredLimit = Number(env[`AUTH_RATE_LIMIT_${route.toUpperCase()}`]);
+  const response = await env.MY_RATE_LIMITER.limit({
+    key,
+    ...(Number.isFinite(configuredLimit) ? { limit: configuredLimit } : {})
+  });
+
+  if (response?.success === false) {
+    return json({ ok: false, error: 'Too many requests' }, 429);
+  }
+
+  return null;
+}
+
+async function buildRateLimitKey(request, route) {
+  const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
+
+  if (route === 'magic') {
+    let email = '';
+    try {
+      const body = await request.clone().json();
+      email = typeof body?.email === 'string' ? body.email.trim().toLowerCase() : '';
+    } catch {
+      email = '';
+    }
+    return `auth:magic:${email || ip}`;
+  }
+
+  return `auth:${route}:${ip}`;
+}
+
+export const __test = {
+  resolveRole,
+  buildRateLimitKey,
+  enforceAuthRateLimit,
+  revokeSessionJti,
+  isSessionRevoked
+};
 
 async function onCheckoutSessionCompleted(session, env) {
   const userId = session.metadata?.user_id || session.client_reference_id;
