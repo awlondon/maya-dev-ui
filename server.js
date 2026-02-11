@@ -441,7 +441,9 @@ assistant.text. If the user asks to modify or generate UI, include ui.html/css/j
 app.use(cors({
   origin: [
     'https://maya-dev-ui.pages.dev',
-    'https://dev.primarydesignco.com'
+    'https://dev.primarydesignco.com',
+    'http://localhost:3000',
+    'http://localhost:5173'
   ],
   credentials: true
 }));
@@ -583,7 +585,7 @@ app.delete('/api/account', async (req, res) => {
   }
 });
 
-app.get('/api/plans', (req, res) => {
+app.get(['/api/plans', '/api/v1/plans'], (req, res) => {
   const plans = Object.values(PLAN_CATALOG)
     .filter((plan) => plan.tier)
     .sort((a, b) => {
@@ -1332,7 +1334,7 @@ app.get('/api/admin/artifact_reports', async (_req, res) => {
   res.json({ ok: true, reports: [] });
 });
 
-app.get('/api/usage/overview', async (req, res) => {
+app.get(['/api/usage/overview', '/api/v1/usage/overview'], async (req, res) => {
   try {
     const session = await getSessionFromRequest(req);
     if (!session) {
@@ -2354,7 +2356,7 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-app.post('/api/auth/email/request', async (req, res) => {
+app.post(['/api/auth/email/request', '/api/v1/auth/email/request'], async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!email) {
