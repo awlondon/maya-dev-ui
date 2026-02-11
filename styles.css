@@ -1554,12 +1554,38 @@ html, body {
   padding: 0;
 }
 
-.playable-button {
+.icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn svg {
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
+}
+
+.playable-btn {
   align-self: center;
   min-width: 40px;
-  height: 40px;
-  padding: 0;
-  font-size: 18px;
+  min-height: 40px;
+  color: var(--text);
+  z-index: 1;
+}
+
+.playable-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.playable-btn:hover:not(:disabled) {
+  background-color: rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
 }
 
 .chat-submit-stack {

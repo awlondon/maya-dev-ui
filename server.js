@@ -1870,7 +1870,7 @@ app.post('/api/chat', async (req, res) => {
       : trimmedContext.messages[trimmedContext.messages.length - 1]?.content || '';
     const playableCodeText = typeof req.body?.currentCode === 'string'
       ? req.body.currentCode
-      : rawCodeContext;
+      : (typeof req.body?.code === 'string' ? req.body.code : rawCodeContext);
     let finalPrompt = playablePromptText;
     if (retryMode) {
       finalPrompt = buildRetryPrompt({

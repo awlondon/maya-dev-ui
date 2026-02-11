@@ -175,7 +175,7 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
-const playableButton = document.getElementById('playable-btn');
+const playableButton = document.getElementById('playable-controller-btn');
 const creditPreviewEl = document.getElementById('credit-preview');
 const chatContextMode = document.getElementById('chatContextMode');
 const micButton = document.getElementById('btn-mic');
@@ -8956,13 +8956,13 @@ function updatePlayableButtonState() {
   }
 
   const prompt = chatInput?.value?.trim() || '';
-  const promptTokens = estimateTokensForContent(prompt);
-  const hasPromptToken = promptTokens > 0;
-  const hasRunningCode = isRuntimeRunning() || isSandboxExecuting();
+  const codeText = getEditorValue().trim();
+  const hasPromptText = prompt.length >= 1;
+  const hasCodeText = codeText.length >= 1;
 
-  if (!hasPromptToken && !hasRunningCode) {
+  if (!hasPromptText && !hasCodeText) {
     playableButton.disabled = true;
-    playableButton.title = 'Add a prompt or run code to enable game mode';
+    playableButton.title = 'Add a prompt or code to enable game mode';
     return;
   }
 
@@ -8984,19 +8984,21 @@ function updatePlayableButtonState() {
   }
 
   playableButton.disabled = false;
-  playableButton.title = 'Make it a Game';
+  playableButton.title = 'Make it a game';
 }
 
-async function sendChat({ playableMode = false, retryMode = false } = {}) {
+async function sendChat({ playableMode = false, retryMode = false, userPrompt = null, code = null } = {}) {
   if (chatState.locked) {
     return;
   }
 
-  const userInput = chatInput.value.trim();
+  const promptSource = typeof userPrompt === 'string' ? userPrompt : chatInput.value;
+  const userInput = promptSource.trim();
+  const resolvedCodeInput = typeof code === 'string' ? code : currentCode;
   const effectiveInput = retryMode
     ? (lastRetryContext?.originalPrompt || '').trim()
     : userInput;
-  const hasCodeInput = Boolean((currentCode || '').trim());
+  const hasCodeInput = Boolean((resolvedCodeInput || '').trim());
   if (!effectiveInput && !hasCodeInput) {
     return;
   }
@@ -9035,7 +9037,7 @@ async function sendChat({ playableMode = false, retryMode = false } = {}) {
     if (estimatedNextCost > remainingToday) {
       const estimate = estimateCreditsPreview({
         userInput: effectiveInput,
-        currentCode
+        currentCode: resolvedCodeInput
       });
       showPaywall({
         reason: throttle.reason,
@@ -9079,7 +9081,7 @@ async function sendChat({ playableMode = false, retryMode = false } = {}) {
     appendMessage('user', userInput || '[Use current editor code]');
   }
 
-  const tokenEstimate = estimateTokensForRequest({ userInput: effectiveInput, currentCode });
+  const tokenEstimate = estimateTokensForRequest({ userInput: effectiveInput, currentCode: resolvedCodeInput });
   recordLargeGeneration(getUserContext().id, tokenEstimate);
 
   const pendingMessageId = addMessage(
@@ -9111,7 +9113,7 @@ async function sendChat({ playableMode = false, retryMode = false } = {}) {
     systemPrompt = systemPromptForIntent;
     const userPromptContent = playableMode
       ? intentAdjustedInput
-      : buildWrappedPrompt(intentAdjustedInput, currentCode, resolvedIntent);
+      : buildWrappedPrompt(intentAdjustedInput, resolvedCodeInput, resolvedIntent);
     const messages = [
       {
         role: 'system',
@@ -9146,7 +9148,8 @@ async function sendChat({ playableMode = false, retryMode = false } = {}) {
         userPrompt: intentAdjustedInput,
         originalPrompt: lastRetryContext?.originalPrompt || intentAdjustedInput,
         previousResponse: lastRetryContext?.previousResponse || '',
-        currentCode
+        currentCode: resolvedCodeInput,
+        code: resolvedCodeInput
       })
     });
 
@@ -9314,7 +9317,15 @@ chatForm.addEventListener('submit', (event) => {
 });
 
 if (playableButton) {
-  playableButton.addEventListener('click', () => sendChat({ playableMode: true }));
+  playableButton.addEventListener('click', () => {
+    const promptText = chatInput?.value || '';
+    const codeText = getEditorValue();
+    sendChat({
+      playableMode: true,
+      userPrompt: promptText,
+      code: codeText
+    });
+  });
 }
 
 if (clearChatButton) {
