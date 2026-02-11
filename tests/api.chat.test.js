@@ -124,3 +124,47 @@ test('chat endpoint proxies upstream non-OK body text', async () => {
   if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
   else process.env.OPENAI_API_KEY = originalApiKey;
 });
+
+
+test('chat endpoint wraps latest user prompt when playable mode is enabled', async () => {
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalFetch = global.fetch;
+  process.env.OPENAI_API_KEY = 'test-key';
+
+  global.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const latest = body.messages[body.messages.length - 1];
+    assert.equal(latest.role, 'user');
+    assert.match(latest.content, /interactive, playable experience/i);
+    assert.match(latest.content, /keyboard interaction/i);
+    assert.match(latest.content, /build something cool/i);
+    assert.match(latest.content, /function draw\(\)/i);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { id: 'cmpl_playable', choices: [{ message: { role: 'assistant', content: 'ok' } }] };
+      }
+    };
+  };
+
+  const req = {
+    method: 'POST',
+    body: {
+      playableMode: true,
+      userPrompt: 'build something cool',
+      currentCode: 'function draw() { return 1; }',
+      messages: [{ role: 'user', content: 'build something cool' }]
+    }
+  };
+  const res = createMockRes();
+
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.id, 'cmpl_playable');
+
+  global.fetch = originalFetch;
+  if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
+  else process.env.OPENAI_API_KEY = originalApiKey;
+});

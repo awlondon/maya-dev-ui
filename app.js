@@ -175,6 +175,7 @@ const chatMessages = document.getElementById('chat-messages');
 const chatForm = document.getElementById('chat-form');
 const chatInput = document.getElementById('chat-input');
 const sendButton = document.getElementById('btn-send');
+const playableButton = document.getElementById('playable-btn');
 const creditPreviewEl = document.getElementById('credit-preview');
 const chatContextMode = document.getElementById('chatContextMode');
 const micButton = document.getElementById('btn-mic');
@@ -3092,6 +3093,7 @@ function handleEditorContentChange() {
   updateLineNumbers();
   updateSaveCodeButtonState();
   requestCreditPreviewUpdate();
+  updatePlayableButtonState();
 }
 
 function updateSaveCodeButtonState() {
@@ -7099,11 +7101,13 @@ function updateThrottleUI(throttle) {
 
 function updateSendButton(throttle) {
   if (!sendButton) {
+    updatePlayableButtonState();
     return;
   }
 
   if (chatState?.locked) {
     sendButton.disabled = true;
+    updatePlayableButtonState();
     return;
   }
 
@@ -7111,6 +7115,7 @@ function updateSendButton(throttle) {
   if (creditState.remainingCredits !== null && creditState.remainingCredits <= 0) {
     sendButton.disabled = true;
     sendButton.title = 'Credit limit reached';
+    updatePlayableButtonState();
     return;
   }
 
@@ -7121,6 +7126,8 @@ function updateSendButton(throttle) {
     sendButton.disabled = false;
     sendButton.title = '';
   }
+
+  updatePlayableButtonState();
 
   if (isDev) {
     console.assert(
@@ -8848,9 +8855,11 @@ function stopLoading() {
 
 function setSendDisabled(isDisabled) {
   if (!sendButton) {
+    updatePlayableButtonState();
     return;
   }
   sendButton.disabled = isDisabled;
+  updatePlayableButtonState();
 }
 
 function unlockChat() {
@@ -8876,13 +8885,51 @@ function lockChat() {
   }, 15000);
 }
 
-async function sendChat() {
+
+function updatePlayableButtonState() {
+  if (!playableButton) {
+    return;
+  }
+
+  const prompt = chatInput?.value?.trim() || '';
+  const code = (currentCode || '').trim();
+  const hasEnoughInput = prompt.length > 20 || code.length > 0;
+
+  if (!hasEnoughInput) {
+    playableButton.disabled = true;
+    playableButton.title = 'Add at least 21 prompt characters or editor code';
+    return;
+  }
+
+  const creditState = getCreditState();
+  if (chatState?.locked) {
+    playableButton.disabled = true;
+    playableButton.title = 'Wait for the current response to finish';
+    return;
+  }
+  if (creditState.remainingCredits !== null && creditState.remainingCredits <= 0) {
+    playableButton.disabled = true;
+    playableButton.title = 'Credit limit reached';
+    return;
+  }
+  if (lastThrottleState?.state === 'blocked') {
+    playableButton.disabled = true;
+    playableButton.title = 'Daily credit limit reached';
+    return;
+  }
+
+  playableButton.disabled = false;
+  playableButton.title = 'Make it a Game';
+}
+
+async function sendChat({ playableMode = false } = {}) {
   if (chatState.locked) {
     return;
   }
 
   const userInput = chatInput.value.trim();
-  if (!userInput) {
+  const hasCodeInput = Boolean((currentCode || '').trim());
+  if (!userInput && !hasCodeInput) {
     return;
   }
 
@@ -8954,7 +9001,8 @@ async function sendChat() {
   lockChat();
   chatInput.value = '';
   updateCreditPreview({ force: true });
-  appendMessage('user', userInput);
+  updatePlayableButtonState();
+  appendMessage('user', userInput || '[Use current editor code]');
 
   const tokenEstimate = estimateTokensForRequest({ userInput, currentCode });
   recordLargeGeneration(getUserContext().id, tokenEstimate);
@@ -8986,6 +9034,9 @@ async function sendChat() {
 
     const systemPromptForIntent = getSystemPromptForIntent(resolvedIntent);
     systemPrompt = systemPromptForIntent;
+    const userPromptContent = playableMode
+      ? intentAdjustedInput
+      : buildWrappedPrompt(intentAdjustedInput, currentCode, resolvedIntent);
     const messages = [
       {
         role: 'system',
@@ -8993,7 +9044,7 @@ async function sendChat() {
       },
       {
         role: 'user',
-        content: buildWrappedPrompt(intentAdjustedInput, currentCode, resolvedIntent)
+        content: userPromptContent
       }
     ];
 
@@ -9014,7 +9065,10 @@ async function sendChat() {
         intentType: resolvedIntent.type,
         contextMode: getSelectedContextMode(),
         historySummary: sessionState?.history_summary?.text || '',
-        user: getUserContext()
+        user: getUserContext(),
+        playableMode,
+        userPrompt: intentAdjustedInput,
+        currentCode
       })
     });
 
@@ -9170,6 +9224,10 @@ chatForm.addEventListener('submit', (event) => {
   sendChat();
 });
 
+if (playableButton) {
+  playableButton.addEventListener('click', () => sendChat({ playableMode: true }));
+}
+
 if (clearChatButton) {
   clearChatButton.addEventListener('click', () => {
     openClearChatModal();
@@ -9181,6 +9239,7 @@ if (chatInput) {
   chatInput.addEventListener('input', () => {
     requestCreditPreviewUpdate();
     requestThrottleUpdate();
+    updatePlayableButtonState();
   });
 }
 
@@ -10298,6 +10357,7 @@ setStatusOnline(false);
 updateGenerationIndicator();
 setPreviewStatus('Ready — auto-run enabled');
 setPreviewExecutionStatus('ready', 'Ready');
+updatePlayableButtonState();
 setInterval(updateSessionAnalyticsPanel, 60000);
 
 if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {

@@ -1554,6 +1554,14 @@ html, body {
   padding: 0;
 }
 
+.playable-button {
+  align-self: flex-end;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  font-size: 18px;
+}
+
 #btn-mic.listening {
   color: var(--error);
   opacity: 1;

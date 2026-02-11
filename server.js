@@ -77,6 +77,7 @@ import {
   resolveContextMode
 } from './utils/tokenEfficiency.js';
 import { getDbPool } from './utils/queryLayer.js';
+import { buildPlayablePrompt } from './server/utils/playableWrapper.js';
 
 const app = express();
 
@@ -1714,6 +1715,55 @@ app.post('/api/billing/portal-session', async (req, res) => {
   }
 });
 
+
+function responseIncludesPlayableElements(text = '') {
+  const normalized = String(text || '').toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const checks = [
+    /objective|goal|win condition/,
+    /mechanic|controls|input|mouse|keyboard|click/,
+    /reward|score|points|progress|feedback/,
+    /game|level|challenge|loop/
+  ];
+  return checks.filter((pattern) => pattern.test(normalized)).length >= 3;
+}
+
+function applyPlayablePromptToMessages(messages = [], { prompt, code } = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return [
+      { role: 'system', content: CHAT_SYSTEM_PROMPT },
+      { role: 'user', content: buildPlayablePrompt({ prompt, code }) }
+    ];
+  }
+
+  let replaced = false;
+  const updated = messages.map((message, index) => {
+    const isLast = index === messages.length - 1;
+    if (isLast && message?.role === 'user') {
+      replaced = true;
+      return {
+        ...message,
+        content: buildPlayablePrompt({
+          prompt: prompt || message?.content || '',
+          code
+        })
+      };
+    }
+    return message;
+  });
+
+  if (!replaced) {
+    updated.push({
+      role: 'user',
+      content: buildPlayablePrompt({ prompt, code })
+    });
+  }
+
+  return updated;
+}
+
 /**
  * CHAT (FULL IMPLEMENTATION — DO NOT STUB)
  */
@@ -1777,7 +1827,21 @@ app.post('/api/chat', async (req, res) => {
       maxCodeChars: DEFAULT_MAX_CODE_CONTEXT_CHARS,
       llmProxyUrl: LLM_PROXY_URL
     });
-    req.body.messages = trimmedContext.messages;
+    const playableMode = Boolean(req.body?.playableMode);
+    const playablePromptText = typeof req.body?.userPrompt === 'string'
+      ? req.body.userPrompt
+      : trimmedContext.messages[trimmedContext.messages.length - 1]?.content || '';
+    const playableCodeText = typeof req.body?.currentCode === 'string'
+      ? req.body.currentCode
+      : rawCodeContext;
+    const trimmedMessages = playableMode
+      ? applyPlayablePromptToMessages(trimmedContext.messages, {
+        prompt: playablePromptText,
+        code: playableCodeText
+      })
+      : trimmedContext.messages;
+
+    req.body.messages = trimmedMessages;
     if (trimmedContext.summaryText) {
       req.body.context_summary = trimmedContext.summaryText;
     }
@@ -2000,18 +2064,49 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
-    const usage = data?.usage || {};
-    const totalTokens = Number(usage?.total_tokens);
-    const usageInputTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens);
-    const usageOutputTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+    let usage = data?.usage || {};
+    let totalTokens = Number(usage?.total_tokens);
+    let usageInputTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens);
+    let usageOutputTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
     const resolvedInputTokens = Number.isFinite(usageInputTokens)
       ? usageInputTokens
       : inputTokensEstimate;
-    const outputText =
+    let outputText =
       data?.choices?.[0]?.message?.content
       ?? data?.candidates?.[0]?.content
       ?? data?.output_text
       ?? '';
+    if (playableMode && outputText && !responseIncludesPlayableElements(outputText)) {
+      const reinforcementPrompt = 'Enhance the previous response by adding interactive game mechanics.';
+      const reinforcementMessages = [
+        ...req.body.messages,
+        { role: 'assistant', content: outputText },
+        { role: 'user', content: reinforcementPrompt }
+      ];
+      const reinforcementRes = await fetch(LLM_PROXY_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          ...req.body,
+          messages: reinforcementMessages
+        })
+      });
+      if (reinforcementRes.ok) {
+        const reinforcementData = await reinforcementRes.json();
+        data = reinforcementData || data;
+        usage = data?.usage || usage;
+        totalTokens = Number(usage?.total_tokens);
+        usageInputTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens);
+        usageOutputTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+        outputText =
+          data?.choices?.[0]?.message?.content
+          ?? data?.candidates?.[0]?.content
+          ?? data?.output_text
+          ?? outputText;
+      }
+    }
     const outputChars = outputText ? String(outputText).length : 0;
     const resolvedOutputTokens = Number.isFinite(usageOutputTokens)
       ? usageOutputTokens
