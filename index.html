@@ -454,7 +454,24 @@
             </div>
             <button id="btn-mic" title="Speak" type="button">🎙️</button>
             <div class="chat-submit-stack">
-              <button id="playable-btn" class="icon-button playable-button" title="Make it a Game" type="button" disabled>🎮</button>
+              <button
+                id="playable-controller-btn"
+                aria-label="Make it a game"
+                class="icon-btn playable-btn"
+                title="Make it a game"
+                type="button"
+                disabled
+              >
+                <svg
+                  aria-hidden="true"
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  focusable="false"
+                >
+                  <path d="M7 6c-1.104 0-2 .896-2 2v1H3v2h2v1c0 1.104.896 2 2 2h2v2h2v-2h2v2h2v-2h2c1.104 0 2-.896 2-2v-1h2v-2h-2V8c0-1.104-.896-2-2-2h-2V4h-2v2h-2V4h-2v2H7z"/>
+                </svg>
+              </button>
               <button id="btn-send" type="submit">Send Chat</button>
             </div>
           </form>

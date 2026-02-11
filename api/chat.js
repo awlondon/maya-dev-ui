@@ -33,7 +33,8 @@ export default async function handler(req, res) {
     userPrompt = '',
     originalPrompt = '',
     previousResponse = '',
-    currentCode = ''
+    currentCode = '',
+    code = ''
   } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     res.status(400).json({ error: 'Missing messages.' });
@@ -56,7 +57,7 @@ export default async function handler(req, res) {
     }
 
     const outboundMessages = playableMode
-      ? applyPlayableWrapper(messages, { userPrompt: finalPrompt, code: currentCode })
+      ? applyPlayableWrapper(messages, { userPrompt: finalPrompt, code: currentCode || code })
       : (() => {
         if (!retryMode) {
           return messages;
