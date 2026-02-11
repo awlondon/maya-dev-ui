@@ -8999,6 +8999,8 @@ function updatePlayableButtonState() {
     return;
   }
 
+  console.debug('Controller button rendered:', playableButton, 'disabled:', playableButton.disabled);
+
   const prompt = getPromptInput().trim();
   const codeText = getEditorCode().trim();
   const hasPromptText = prompt.length >= 1;
