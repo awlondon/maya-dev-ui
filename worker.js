@@ -37,6 +37,21 @@ function isDevEnv(env) {
   return label === 'dev' || label === 'development';
 }
 
+
+function resolveUserStoreDriver(env) {
+  const configured = String(env?.USER_STORE_DRIVER || '').trim().toLowerCase();
+  if (configured === 'csv') {
+    return 'csv';
+  }
+  if (configured === 'postgres') {
+    return 'postgres';
+  }
+  return isDevEnv(env) ? 'postgres' : 'csv';
+}
+
+function isCsvUserStoreDriver(env) {
+  return resolveUserStoreDriver(env) === 'csv';
+}
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -863,13 +878,14 @@ async function readUsersCSV(env) {
 }
 
 function assertLegacyUserStoreEnabled(env) {
-  if (env.LEGACY_USERS_CSV === 'true') {
+  if (isCsvUserStoreDriver(env) || env.LEGACY_USERS_CSV === 'true') {
     return;
   }
-  throw new Error('Legacy CSV user store is disabled. Use Postgres-backed storage instead.');
+  throw new Error('USER_STORE_DRIVER=postgres is enabled; legacy CSV user store is disabled.');
 }
 
 async function readUsageLogRows(env) {
+  assertLegacyUserStoreEnabled(env);
   const repo = env.GITHUB_REPO;
   const branch = env.GITHUB_BRANCH || 'main';
 

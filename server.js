@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveUserStoreDriver, isCsvUserStoreDriver } from './db/index.js';
+import { recordUsageEvent } from './db/usage.js';
 import {
   fetchCheapestAllowedModel,
   fetchModelPricing,
@@ -21,7 +23,6 @@ import {
   getUsageAnalyticsPool,
   insertLlmTurnLog,
   insertRouteDecision,
-  insertUsageEvent,
   isPremiumModel
 } from './utils/usageAnalytics.js';
 import {
@@ -85,13 +86,15 @@ const app = express();
 async function recordUsageEventToDb({
   user,
   sessionId,
+  requestId,
   intentType,
   model,
   inputTokens,
   outputTokens,
   creditsCharged,
   latencyMs,
-  status
+  status,
+  timestamp
 }) {
   if (!user || !model) {
     return;
@@ -113,8 +116,9 @@ async function recordUsageEventToDb({
     ) * Number(pricing.credit_multiplier)
     : 0;
 
-  await insertUsageEvent({
+  await recordUsageEvent({
     userId: user.user_id,
+    requestId,
     sessionId: sessionId || crypto.randomUUID(),
     intentType,
     model,
@@ -124,7 +128,9 @@ async function recordUsageEventToDb({
     creditNormFactor,
     modelCostUsd,
     latencyMs: latencyMs ?? 0,
-    success: status === 'success'
+    success: status === 'success',
+    status: status === 'success' ? 'success' : 'error',
+    timestamp
   });
 }
 
@@ -134,6 +140,9 @@ function usageEventLoggingMiddleware(req, _res, next) {
 }
 
 app.use(usageEventLoggingMiddleware);
+
+const USER_STORE_DRIVER = resolveUserStoreDriver(process.env);
+const CSV_USER_STORE_FALLBACK_ENABLED = isCsvUserStoreDriver(process.env);
 
 const CREDIT_MONTHLY_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const CREDIT_DAILY_RESET_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -2213,7 +2222,19 @@ app.post('/api/chat', async (req, res) => {
           model: data?.model || req.body?.model || requestedModel,
           tokens_in: resolvedInputTokens,
           tokens_out: resolvedOutputTokens
-        })
+        }),
+        usageEvent: {
+          sessionId,
+          intentType,
+          model: data?.model || req.body?.model || requestedModel,
+          inputTokens: resolvedInputTokens,
+          outputTokens: resolvedOutputTokens,
+          totalTokens: Number.isFinite(totalTokens) ? totalTokens : (resolvedInputTokens + resolvedOutputTokens),
+          creditsUsed: actualCredits,
+          latencyMs: Date.now() - requestStartedAt,
+          status: 'success',
+          sourceHash: crypto.createHash('sha256').update(`${user.user_id}:${requestId}:success`).digest('hex')
+        }
       });
       nextRemaining = Number.isFinite(chargeResult.nextBalance)
         ? chargeResult.nextBalance
@@ -2961,6 +2982,7 @@ app.post('/api/stripe/webhook', async (req, res) => {
 const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log('Maya API listening on', port);
+  logStructured('info', 'user_store_driver_selected', { user_store_driver: USER_STORE_DRIVER });
   startCreditResetScheduler();
 });
 
@@ -3239,6 +3261,9 @@ function parseCSV(text) {
 }
 
 async function loadUsageLogRows() {
+  if (!CSV_USER_STORE_FALLBACK_ENABLED) {
+    return [];
+  }
   try {
     const fileUrl = new URL('./data/usage_log.csv', import.meta.url);
     const text = await fs.readFile(fileUrl, 'utf8');
@@ -3901,31 +3926,35 @@ async function appendUsageEntry({
       await req.logUsageEventToDb({
         user,
         sessionId,
+        requestId,
         intentType,
         model,
         inputTokens,
         outputTokens,
         creditsCharged,
         latencyMs,
-        status
+        status,
+        timestamp: timestampValue
       });
     } else {
       await recordUsageEventToDb({
         user,
         sessionId,
+        requestId,
         intentType,
         model,
         inputTokens,
         outputTokens,
         creditsCharged,
         latencyMs,
-        status
+        status,
+        timestamp: timestampValue
       });
     }
   }
 
 
-  if (process.env.GITHUB_TOKEN && process.env.GITHUB_REPO) {
+  if (CSV_USER_STORE_FALLBACK_ENABLED && process.env.GITHUB_TOKEN && process.env.GITHUB_REPO) {
     const { appendUsageLog } = await import('./api/usageLog.js');
     await appendUsageLog(process.env, entry);
   }
