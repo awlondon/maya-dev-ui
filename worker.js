@@ -498,61 +498,11 @@ async function verifyMagicLink(request, env) {
 
   await env.AUTH_KV.delete(`magic:${hash}`);
 
-  const user = {
-    id: `email:${record.email}`,
-    email: record.email,
-    provider: 'email'
-  };
-
-  return issueSession(user, env, request);
-}
-
-async function hashToken(token) {
-  const data = new TextEncoder().encode(token);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return bufToHex(digest);
-}
-
-async function sendMagicEmail(email, token, env, requestOrigin) {
-  if (!env.MAGIC_EMAIL_FROM) {
-    console.warn('MAGIC_EMAIL_FROM is not configured; skipping email send.');
-    return;
-  }
-
-  const base = env.MAGIC_LINK_BASE || requestOrigin;
-  const link = `${base.replace(/\/$/, '')}/auth/magic?token=${encodeURIComponent(token)}`;
-  const subject = 'Sign in to Maya Dev UI';
-  const bodyText = `Click the link below to sign in:\n\n${link}\n\nThis link expires in 15 minutes.\nIf you didn’t request this, you can ignore this email.`;
-
-  const payload = {
-    personalizations: [
-      {
-        to: [{ email }]
-      }
-    ],
-    from: {
-      email: env.MAGIC_EMAIL_FROM,
-      name: env.MAGIC_EMAIL_FROM_NAME || 'Maya Dev UI'
-    },
-    subject,
-    content: [
-      {
-        type: 'text/plain',
-        value: bodyText
-      }
-    ]
-  };
-
-  const response = await fetch(MAILCHANNELS_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Mail send failed: ${response.status} ${text}`);
-  }
+function parseEnvOriginList(raw = '') {
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 async function issueSession(user, env, request) {
@@ -600,43 +550,11 @@ async function issueSession(user, env, request) {
   });
 }
 
-function getCookieValue(cookieHeader, name) {
-  if (!cookieHeader) {
-    return null;
-  }
-  const cookies = cookieHeader.split(';');
-  for (const entry of cookies) {
-    const [key, ...rest] = entry.trim().split('=');
-    if (key === name) {
-      return rest.join('=');
-    }
-  }
-  return null;
-}
-
-function timingSafeEqualString(a, b) {
-  if (a.length !== b.length) return false;
-  let out = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    out |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return out === 0;
-}
-
-async function verifySessionToken(token, secret) {
-  const decoded = decodeJwtParts(token);
-  if (!decoded) return null;
-  const expectedSignature = await hmacSHA256Base64Url(secret, decoded.signingInput);
-  if (!timingSafeEqualString(expectedSignature, decoded.signature)) {
-    return null;
-  }
-  return decoded.payload;
-}
-
-async function getSessionFromRequest(request, env) {
-  const session = await getSession(request, env);
-  return session?.user || null;
-}
+function corsHeaders(request, env) {
+  const origin = request.headers.get('Origin') || '';
+  const allowOrigin = allowedOrigins(env).includes(origin)
+    ? origin
+    : DEFAULT_ALLOWED_ORIGINS[0];
 
 async function getSession(request, env) {
   const token = getCookieValue(request.headers.get('cookie'), SESSION_COOKIE_NAME);
@@ -936,210 +854,63 @@ async function getUser(env, userId) {
   return getUserFromStore(env, userId);
 }
 
-async function upsertUserBillingState(env, userId, patch) {
-  return upsertUserToStore(env, userId, patch);
-}
-
-async function findUserIdByStripeCustomer(env, stripeCustomerId) {
-  return findUserIdByStripeCustomerInStore(env, stripeCustomerId);
-}
-
-async function getUserFromStore(env, userId) {
-  const { rows } = await readUsersCSV(env);
-  return rows.find((row) => row.user_id === userId) || null;
-}
-
-async function upsertUserToStore(env, userId, patch) {
-  assertLegacyUserStoreEnabled(env);
-  const repo = env.GITHUB_REPO;
-  const branch = env.GITHUB_BRANCH || 'main';
-
-  const { sha, rows } = await readUsersCSV(env);
-
-  const user = rows.find((row) => row.user_id === userId);
-  if (!user) {
-    throw new Error(`User ${userId} not found`);
+function canonicalApiOrigin(env) {
+  const origin = env.CANONICAL_API_ORIGIN || env.API_ORIGIN || env.API_BASE_URL;
+  if (!origin) {
+    throw new Error('Missing CANONICAL_API_ORIGIN');
   }
+  return origin.replace(/\/$/, '');
+}
 
-  Object.entries(patch).forEach(([key, value]) => {
-    if (key === 'clamp_remaining_to_total' && value === true) {
-      const total = Number(user.credits_total || 0);
-      user.credits_remaining = Math.min(Number(user.credits_remaining || 0), total);
-    } else {
-      user[key] = value;
-    }
-  });
-
-  const csv = serializeCSV(rows);
-  const encoded = btoa(csv);
-
-  await githubRequest(env, `/repos/${repo}/contents/data/users.csv`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      message: `Update billing for user ${userId}`,
-      content: encoded,
-      sha,
-      branch
-    })
+function withCors(response, headers) {
+  const nextHeaders = new Headers(response.headers);
+  Object.entries(headers).forEach(([key, value]) => nextHeaders.set(key, value));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: nextHeaders
   });
 }
 
-async function findUserIdByStripeCustomerInStore(env, stripeCustomerId) {
-  const { rows } = await readUsersCSV(env);
-  const user = rows.find((row) => row.stripe_customer_id === stripeCustomerId);
-  return user ? user.user_id : null;
-}
+export default {
+  async fetch(request, env) {
+    const baseCorsHeaders = corsHeaders(request, env);
 
-async function githubRequest(env, path, options = {}) {
-  const res = await fetch(`${GITHUB_API}${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'maya-dev-worker',
-      ...(options.headers || {})
-    }
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API error ${res.status}: ${text}`);
-  }
-
-  return res.json();
-}
-
-async function readUsersCSV(env) {
-  assertLegacyUserStoreEnabled(env);
-  const repo = env.GITHUB_REPO;
-  const branch = env.GITHUB_BRANCH || 'main';
-
-  const data = await githubRequest(env, `/repos/${repo}/contents/data/users.csv?ref=${branch}`);
-  const content = atob(data.content);
-  return {
-    sha: data.sha,
-    rows: parseCSV(content)
-  };
-}
-
-function assertLegacyUserStoreEnabled(env) {
-  if (env.LEGACY_USERS_CSV === 'true') {
-    return;
-  }
-  throw new Error('Legacy CSV user store is disabled. Use Postgres-backed storage instead.');
-}
-
-async function readUsageLogRows(env) {
-  const repo = env.GITHUB_REPO;
-  const branch = env.GITHUB_BRANCH || 'main';
-
-  const res = await githubRequest(env, `/repos/${repo}/contents/data/usage_log.csv?ref=${branch}`);
-  const csv = atob(res.content);
-  return parseCSV(csv);
-}
-
-function filterRows(rows, { userId, days }) {
-  const cutoff = new Date();
-  cutoff.setUTCDate(cutoff.getUTCDate() - days);
-
-  return rows.filter((row) => {
-    if (userId && row.user_id !== userId) return false;
-    if (!row.timestamp_utc) return false;
-    return new Date(row.timestamp_utc) >= cutoff;
-  });
-}
-
-function computeAnalytics(rows) {
-  const dailyMap = {};
-  let totalCredits = 0;
-  let totalLatency = 0;
-  let successCount = 0;
-
-  for (const row of rows) {
-    if (!row.timestamp_utc) {
-      continue;
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: baseCorsHeaders
+      });
     }
 
-    const date = row.timestamp_utc.slice(0, 10);
-
-    if (!dailyMap[date]) {
-      dailyMap[date] = {
-        date,
-        requests: 0,
-        credits: 0,
-        latency_sum: 0,
-        success: 0,
-        by_intent: {}
-      };
+    let origin;
+    try {
+      origin = canonicalApiOrigin(env);
+    } catch (error) {
+      return withCors(
+        new Response(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'Bad gateway' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' }
+        }),
+        baseCorsHeaders
+      );
     }
 
-    const day = dailyMap[date];
-    day.requests += 1;
+    const url = new URL(request.url);
+    const upstreamPath = normalizePathname(url.pathname);
+    const upstreamUrl = new URL(`${origin}${upstreamPath}${url.search}`);
 
-    const credits = Number(row.credits_charged || 0);
-    const latency = Number(row.latency_ms || 0);
+    const headers = new Headers(request.headers);
+    headers.set('x-forwarded-host', url.host);
+    headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
-    day.credits += credits;
-    day.latency_sum += latency;
-
-    if (row.status === 'success') {
-      day.success += 1;
-      successCount += 1;
-    }
-
-    if (row.intent_type) {
-      day.by_intent[row.intent_type] = (day.by_intent[row.intent_type] || 0) + 1;
-    }
-
-    totalCredits += credits;
-    totalLatency += latency;
-  }
-
-  const daily = Object.values(dailyMap)
-    .map((day) => ({
-      date: day.date,
-      requests: day.requests,
-      credits: day.credits,
-      avg_latency_ms: day.requests ? Math.round(day.latency_sum / day.requests) : 0,
-      by_intent: day.by_intent
-    }))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  return {
-    summary: {
-      total_requests: rows.length,
-      total_credits: totalCredits,
-      avg_latency_ms: rows.length ? Math.round(totalLatency / rows.length) : 0,
-      success_rate: rows.length ? Number((successCount / rows.length).toFixed(2)) : 0
-    },
-    daily
-  };
-}
-
-function parseCSV(csvText) {
-  const trimmed = csvText.trim();
-  if (!trimmed) {
-    return [];
-  }
-  const lines = trimmed.split('\n');
-  const headers = lines.shift().split(',');
-
-  return lines.map((line) => {
-    const values = line.split(',');
-    const obj = {};
-    headers.forEach((header, index) => {
-      obj[header] = values[index] ?? '';
+    const upstreamResponse = await fetch(upstreamUrl.toString(), {
+      method: request.method,
+      headers,
+      body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body,
+      redirect: 'manual'
     });
-    return obj;
-  });
-}
 
-function serializeCSV(rows) {
-  const headers = REQUIRED_USER_HEADERS;
-  const lines = [
-    headers.join(','),
-    ...rows.map((row) => headers.map((header) => String(row[header] ?? '')).join(','))
-  ];
-
-  return lines.join('\n') + '\n';
-}
+    return withCors(upstreamResponse, baseCorsHeaders);
+  }
+};
