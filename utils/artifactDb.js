@@ -50,7 +50,9 @@ export function mapArtifactRow(row) {
       artifact_id: row.forked_from_id || null,
       owner_user_id: row.forked_from_owner_user_id || null,
       version_id: row.forked_from_version_id || null,
-      version_label: row.forked_from_version_label || null
+      version_label: row.forked_from_version_label || null,
+      original_artifact_id: row.origin_artifact_id || row.forked_from_id || row.id || null,
+      original_owner_user_id: row.origin_owner_user_id || row.forked_from_owner_user_id || row.owner_user_id || null
     },
     source_session: row.source_session || { session_id: '', credits_used_estimate: 0 },
     current_version_id: row.artifact_current_version_id || null,
@@ -84,7 +86,10 @@ export function mapArtifactVersionRow(row) {
     },
     code_versions: row.code_versions || null,
     chat: row.chat || { included: false, messages: null },
-    stats: row.stats || {}
+    stats: row.stats || {},
+    metadata: row.version_metadata || {},
+    code_references: row.code_references || [],
+    parent_version_id: row.parent_version_id || null
   };
 }
 
@@ -98,7 +103,10 @@ export function mapArtifactVersionSummaryRow(row) {
     label: row.label || null,
     summary: row.summary || null,
     version_index: Number(row.version_index || 0),
-    stats: row.stats || {}
+    stats: row.stats || {},
+    metadata: row.version_metadata || {},
+    code_references: row.code_references || [],
+    parent_version_id: row.parent_version_id || null
   };
 }
 
@@ -118,6 +126,8 @@ async function fetchArtifactRows({ whereClause = '', params = [] } = {}) {
       a.forked_from_owner_user_id,
       a.forked_from_version_id,
       a.forked_from_version_label,
+      a.origin_artifact_id,
+      a.origin_owner_user_id,
       a.forks_count,
       a.imports_count,
       a.likes_count,
@@ -133,6 +143,8 @@ async function fetchArtifactRows({ whereClause = '', params = [] } = {}) {
       v.code_versions,
       v.chat,
       v.stats,
+      v.version_metadata,
+      v.code_references,
       tag_data.tags
      FROM artifacts a
      LEFT JOIN artifact_media m ON m.artifact_id = a.id
@@ -222,7 +234,8 @@ export async function fetchArtifactVersions(artifactId) {
 export async function fetchArtifactVersionSummaries(artifactId) {
   const pool = getArtifactsDbPool();
   const result = await pool.query(
-    `SELECT id, artifact_id, session_id, created_at, label, summary, version_index, stats
+    `SELECT id, artifact_id, session_id, created_at, label, summary, version_index, stats,
+            version_metadata, code_references, parent_version_id
      FROM artifact_versions
      WHERE artifact_id = $1
      ORDER BY version_index ASC`,
@@ -268,6 +281,23 @@ export async function createArtifact({
     turns: Array.isArray(chat) ? chat.length : 0,
     credits_used_estimate: Number(sourceSession?.credits_used_estimate || 0) || 0
   };
+  const codeReferences = [{
+    ref: codeBlobRef,
+    language: code.language || 'html',
+    bytes: Buffer.byteLength(String(code.content || ''), 'utf8'),
+    hash_sha256: crypto.createHash('sha256').update(String(code.content || '')).digest('hex')
+  }];
+  const versionMetadata = {
+    title: String(title || ''),
+    description: String(description || ''),
+    visibility: String(visibility || 'private'),
+    derived_from: {
+      artifact_id: derivedFrom?.artifact_id || null,
+      owner_user_id: derivedFrom?.owner_user_id || null,
+      version_id: derivedFrom?.version_id || null,
+      version_label: derivedFrom?.version_label || null
+    }
+  };
 
   try {
     await client.query('BEGIN');
@@ -275,9 +305,10 @@ export async function createArtifact({
       `INSERT INTO artifacts
         (id, owner_user_id, title, description, visibility, created_at, updated_at,
          forked_from_id, forked_from_owner_user_id, forked_from_version_id, forked_from_version_label,
+         origin_artifact_id, origin_owner_user_id,
          current_version_id, versioning_enabled, chat_history_public, source_session)
        VALUES
-        ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11, false, false, $12)`,
+        ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $1, $2, $11, false, false, $12)`,
       [
         artifactId,
         ownerUserId,
@@ -296,9 +327,9 @@ export async function createArtifact({
     await client.query(
       `INSERT INTO artifact_versions
         (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
-         code_language, code_content, code_versions, chat, stats)
+         code_language, code_content, code_versions, chat, stats, version_metadata, code_references, parent_version_id)
        VALUES
-        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL)`,
       [
         versionId,
         artifactId,
@@ -314,7 +345,9 @@ export async function createArtifact({
         chat
           ? { included: true, messages: chat }
           : { included: false, messages: null },
-        stats
+        stats,
+        versionMetadata,
+        codeReferences
       ]
     );
     if (screenshotUrl) {
@@ -370,6 +403,12 @@ export async function createArtifactVersion({
     turns: Array.isArray(chat) ? chat.length : 0,
     credits_used_estimate: Number(sourceSession?.credits_used_estimate || 0) || 0
   };
+  const codeReferences = [{
+    ref: codeBlobRef,
+    language: code.language || 'html',
+    bytes: Buffer.byteLength(String(code.content || ''), 'utf8'),
+    hash_sha256: crypto.createHash('sha256').update(String(code.content || '')).digest('hex')
+  }];
 
   try {
     await client.query('BEGIN');
@@ -380,12 +419,26 @@ export async function createArtifactVersion({
       [artifactId]
     );
     const nextIndex = Number(maxResult.rows[0]?.max_index || 0) + 1;
+    const previousVersionResult = await client.query(
+      `SELECT id
+       FROM artifact_versions
+       WHERE artifact_id = $1
+       ORDER BY version_index DESC
+       LIMIT 1`,
+      [artifactId]
+    );
+    const previousVersionId = previousVersionResult.rows[0]?.id || null;
+    const versionMetadata = {
+      title: String(title || ''),
+      description: String(description || ''),
+      visibility: String(visibility || 'private')
+    };
     await client.query(
       `INSERT INTO artifact_versions
         (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
-         code_language, code_content, code_versions, chat, stats)
+         code_language, code_content, code_versions, chat, stats, version_metadata, code_references, parent_version_id)
        VALUES
-        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         versionId,
         artifactId,
@@ -401,7 +454,10 @@ export async function createArtifactVersion({
         chat
           ? { included: true, messages: chat }
           : { included: false, messages: null },
-        stats
+        stats,
+        versionMetadata,
+        codeReferences,
+        previousVersionId
       ]
     );
     await client.query(
@@ -582,6 +638,10 @@ export async function forkArtifact({
         a.description,
         a.visibility,
         a.current_version_id,
+        a.forked_from_id,
+        a.forked_from_owner_user_id,
+        a.origin_artifact_id,
+        a.origin_owner_user_id,
         m.screenshot_url
        FROM artifacts a
        LEFT JOIN artifact_media m ON m.artifact_id = a.id
@@ -611,14 +671,32 @@ export async function forkArtifact({
       turns: 0,
       credits_used_estimate: Number(creditsUsedEstimate || 0) || 0
     };
+    const originArtifactId = source.origin_artifact_id || source.forked_from_id || source.id;
+    const originOwnerUserId = source.origin_owner_user_id || source.forked_from_owner_user_id || source.owner_user_id;
+    const codeReferences = [{
+      ref: codeBlobRef,
+      language: resolvedVersion?.code_language || 'html',
+      bytes: Buffer.byteLength(String(resolvedVersion?.code_content || ''), 'utf8'),
+      hash_sha256: crypto.createHash('sha256').update(String(resolvedVersion?.code_content || '')).digest('hex')
+    }];
+    const versionMetadata = {
+      forked_from: {
+        source_artifact_id: source.id,
+        source_version_id: resolvedVersion?.id || null,
+        source_version_label: versionNumber ? `v${versionNumber}` : null,
+        origin_artifact_id: originArtifactId,
+        origin_owner_user_id: originOwnerUserId
+      }
+    };
 
     await client.query(
       `INSERT INTO artifacts
         (id, owner_user_id, title, description, visibility, created_at, updated_at,
          forked_from_id, forked_from_owner_user_id, forked_from_version_id, forked_from_version_label,
+         origin_artifact_id, origin_owner_user_id,
          current_version_id, versioning_enabled, chat_history_public, source_session)
        VALUES
-        ($1, $2, $3, $4, 'private', $5, $5, $6, $7, $8, $9, $10, false, false, $11)`,
+        ($1, $2, $3, $4, 'private', $5, $5, $6, $7, $8, $9, $10, $11, $12, false, false, $13)`,
       [
         newId,
         ownerUserId,
@@ -629,6 +707,8 @@ export async function forkArtifact({
         source.owner_user_id,
         resolvedVersion?.id || null,
         versionNumber ? `v${versionNumber}` : null,
+        originArtifactId,
+        originOwnerUserId,
         versionId,
         { session_id: String(sessionId || ''), credits_used_estimate: stats.credits_used_estimate }
       ]
@@ -636,9 +716,9 @@ export async function forkArtifact({
     await client.query(
       `INSERT INTO artifact_versions
         (id, artifact_id, version_index, code_blob_ref, created_at, summary, label, session_id,
-         code_language, code_content, code_versions, chat, stats)
+         code_language, code_content, code_versions, chat, stats, version_metadata, code_references, parent_version_id)
        VALUES
-        ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL)`,
       [
         versionId,
         newId,
@@ -651,7 +731,9 @@ export async function forkArtifact({
         resolvedVersion?.code_content || '',
         resolvedVersion?.code_versions || null,
         { included: false, messages: null },
-        stats
+        stats,
+        versionMetadata,
+        codeReferences
       ]
     );
     if (source.screenshot_url) {
@@ -668,8 +750,8 @@ export async function forkArtifact({
        SET forks_count = forks_count + 1,
            imports_count = imports_count + 1,
            updated_at = $1
-       WHERE id = $2`,
-      [now, sourceArtifactId]
+       WHERE id = ANY($2::uuid[])`,
+      [now, Array.from(new Set([sourceArtifactId, originArtifactId].filter(Boolean)))]
     );
     await client.query('COMMIT');
   } catch (error) {

@@ -779,7 +779,7 @@ app.post('/api/artifacts', async (req, res) => {
   }
 });
 
-app.post('/api/artifacts/:id/versions', async (req, res) => {
+async function handleCreateArtifactVersion(req, res) {
   let artifactId = '';
   let userId = '';
   try {
@@ -861,7 +861,7 @@ app.post('/api/artifacts/:id/versions', async (req, res) => {
       outcome: 'success'
     });
 
-    return res.json({ ok: true, artifact: updated });
+    return res.json({ ok: true, artifact: applyArtifactDefaults(updated) });
   } catch (error) {
     logStructured('error', 'artifact_version_create_failed', {
       user_id: userId || null,
@@ -871,7 +871,10 @@ app.post('/api/artifacts/:id/versions', async (req, res) => {
     console.error('Failed to create artifact version.', error);
     return res.status(500).json({ ok: false, error: 'Failed to create artifact version' });
   }
-});
+}
+
+app.post('/api/artifacts/:id/version', handleCreateArtifactVersion);
+app.post('/api/artifacts/:id/versions', handleCreateArtifactVersion);
 
 app.get('/api/artifacts/:id/versions', async (req, res) => {
   try {
@@ -2983,7 +2986,9 @@ function applyArtifactDefaults(artifact) {
       artifact_id: artifact?.derived_from?.artifact_id || null,
       owner_user_id: artifact?.derived_from?.owner_user_id || null,
       version_id: artifact?.derived_from?.version_id || null,
-      version_label: artifact?.derived_from?.version_label || null
+      version_label: artifact?.derived_from?.version_label || null,
+      original_artifact_id: artifact?.derived_from?.original_artifact_id || artifact?.derived_from?.artifact_id || null,
+      original_owner_user_id: artifact?.derived_from?.original_owner_user_id || artifact?.derived_from?.owner_user_id || null
     }
   };
 }

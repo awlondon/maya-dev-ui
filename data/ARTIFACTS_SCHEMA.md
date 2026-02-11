@@ -35,6 +35,8 @@ Canonical schema lives in `data/migrations/002_create_artifacts_profiles.sql`.
 | forked_from_owner_user_id | uuid | FK to parent owner. |
 | forked_from_version_id | uuid | FK to parent version. |
 | forked_from_version_label | text | Label for parent version. |
+| origin_artifact_id | uuid | FK to root/original artifact in fork lineage. |
+| origin_owner_user_id | uuid | FK to root/original artifact owner. |
 | forks_count | int | Total forks. |
 | imports_count | int | Total imports. |
 | likes_count | int | Like count. |
@@ -61,6 +63,9 @@ Canonical schema lives in `data/migrations/002_create_artifacts_profiles.sql`.
 | code_versions | jsonb | Optional code versions array. |
 | chat | jsonb | Chat payload. |
 | stats | jsonb | Version stats. |
+| version_metadata | jsonb | Structured version metadata snapshot (title/visibility/source details). |
+| code_references | jsonb | Code blob references + hashes/size for auditability. |
+| parent_version_id | uuid | Optional previous version link for diff chain traversal. |
 
 ### `artifact_media`
 
