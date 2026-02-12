@@ -532,6 +532,7 @@ const outputPanel = document.getElementById('output-panel');
 const fullscreenToggle = document.getElementById('fullscreenToggle');
 const interfaceStatus = document.getElementById('interfaceStatus');
 const viewDiffBtn = document.getElementById('viewDiffBtn');
+const reportIssueButton = document.getElementById('reportIssueButton');
 const loadingIndicator = document.getElementById('loadingIndicator');
 const executionWarnings = document.getElementById('executionWarnings');
 const sandboxStatus = document.getElementById('sandbox-status');
@@ -4133,6 +4134,102 @@ const perfHudState = {
   backendError: null
 };
 
+const ISSUE_LOG_LIMIT = 200;
+const ISSUE_LOG_METHODS = ['debug', 'log', 'info', 'warn', 'error'];
+const issueLogBuffer = [];
+
+function sanitizeTextForIssueReport(value, { maxLength = 1000 } = {}) {
+  const raw = String(value ?? '');
+  const scrubbed = raw
+    .replace(/(authorization\s*[:=]\s*)(bearer\s+)?[a-z0-9._~+\/-]{8,}/gi, '$1[REDACTED]')
+    .replace(/(token|api[_-]?key|password|secret|cookie|session(?:id)?)\s*[:=]\s*['"`]?[^\s,;"'`]+/gi, '$1=[REDACTED]')
+    .replace(/(https?:\/\/[^\s?#]+\?[^\s#]+)/gi, (match) => match.replace(/([?&][^=]+=)[^&]*/g, '$1[REDACTED]'));
+  if (scrubbed.length <= maxLength) {
+    return scrubbed;
+  }
+  return `${scrubbed.slice(0, maxLength)}…`;
+}
+
+function sanitizeIssuePayload(value, seen = new WeakSet()) {
+  if (value == null) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return sanitizeTextForIssueReport(value, { maxLength: 8000 });
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeIssuePayload(entry, seen));
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+    seen.add(value);
+    const next = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (/(token|secret|password|cookie|authorization|api[_-]?key|session)/i.test(key)) {
+        next[key] = '[REDACTED]';
+        continue;
+      }
+      next[key] = sanitizeIssuePayload(entry, seen);
+    }
+    return next;
+  }
+  return sanitizeTextForIssueReport(String(value), { maxLength: 2000 });
+}
+
+function recordIssueLog(level, args = []) {
+  issueLogBuffer.push({
+    at: new Date().toISOString(),
+    level,
+    message: sanitizeTextForIssueReport(args.map((entry) => {
+      if (entry instanceof Error) {
+        return `${entry.name}: ${entry.message}`;
+      }
+      if (typeof entry === 'string') {
+        return entry;
+      }
+      try {
+        return JSON.stringify(sanitizeIssuePayload(entry));
+      } catch {
+        return String(entry);
+      }
+    }).join(' '), { maxLength: 1200 })
+  });
+
+  if (issueLogBuffer.length > ISSUE_LOG_LIMIT) {
+    issueLogBuffer.splice(0, issueLogBuffer.length - ISSUE_LOG_LIMIT);
+  }
+}
+
+function initializeIssueLogCapture() {
+  if (window.__ISSUE_LOG_CAPTURE_READY__) {
+    return;
+  }
+  window.__ISSUE_LOG_CAPTURE_READY__ = true;
+  for (const method of ISSUE_LOG_METHODS) {
+    const original = console[method];
+    if (typeof original !== 'function') {
+      continue;
+    }
+    console[method] = (...args) => {
+      recordIssueLog(method, args);
+      original.apply(console, args);
+    };
+  }
+
+  window.addEventListener('error', (event) => {
+    recordIssueLog('error', [event?.message || 'Unhandled window error']);
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    recordIssueLog('error', ['Unhandled promise rejection', event?.reason]);
+  });
+}
+
 function isPerfHudEnabled() {
   if (!isDev) {
     return window.__ENABLE_PERF_HUD === true;
@@ -4266,6 +4363,160 @@ async function copyToClipboard(text) {
     }
   }
 }
+
+function getWorkspaceContextForIssue() {
+  const visibleView = isAccountRoute()
+    ? 'account'
+    : isGalleryRoute()
+      ? 'gallery'
+      : isPublicGalleryRoute()
+        ? 'public-gallery'
+        : isProfileEditRoute()
+          ? 'profile-edit'
+          : isPublicProfileRoute()
+            ? 'public-profile'
+            : 'workspace';
+
+  return {
+    route: window.location.pathname || '/',
+    visible_view: visibleView,
+    active_artifact_id: activeArtifactId || null,
+    active_version_id: sessionState?.current_editor?.version_id || null,
+    session_id: sessionState?.session_id || sessionId || null
+  };
+}
+
+function getPerfSnapshotForIssue() {
+  const frontendSnapshot = frontendPerf.getSnapshot();
+  return sanitizeIssuePayload({
+    frontend: frontendSnapshot,
+    backend: perfHudState.backend,
+    backend_error: perfHudState.backendError,
+    backend_updated_at: perfHudState.lastBackendUpdateAt
+      ? new Date(perfHudState.lastBackendUpdateAt).toISOString()
+      : null
+  });
+}
+
+function getBrowserSnapshotForIssue() {
+  return sanitizeIssuePayload({
+    user_agent: navigator.userAgent,
+    language: navigator.language,
+    platform: navigator.platform,
+    viewport: `${window.innerWidth}x${window.innerHeight}`,
+    screen: `${window.screen?.width || 0}x${window.screen?.height || 0}`,
+    online: navigator.onLine,
+    url: window.location.href,
+    referrer: document.referrer || null,
+    timestamp: new Date().toISOString()
+  });
+}
+
+function buildIssueMarkdown(report) {
+  const contextJson = JSON.stringify(report.context, null, 2);
+  const logsJson = JSON.stringify(report.logs, null, 2);
+  const perfJson = JSON.stringify(report.perf, null, 2);
+  const browserJson = JSON.stringify(report.browser, null, 2);
+  const screenshotInfo = report.screenshot_data_url
+    ? 'Captured (base64 png included in JSON report).'
+    : 'Not captured.';
+
+  return `## Bug summary
+- Describe what broke:
+
+## Reproduction steps
+1. Open the app at ${report.context.route || '/'}
+2. ...
+3. ...
+
+## Expected behavior
+- 
+
+## Actual behavior
+- 
+
+## Context snapshot
+\`\`\`json
+${contextJson}
+\`\`\`
+
+## Recent logs (last ${report.log_limit})
+\`\`\`json
+${logsJson}
+\`\`\`
+
+## Performance snapshot
+\`\`\`json
+${perfJson}
+\`\`\`
+
+## Browser snapshot
+\`\`\`json
+${browserJson}
+\`\`\`
+
+## Screenshot
+${screenshotInfo}
+
+## Redaction
+Sensitive values (tokens, cookies, authorization headers, secrets) are redacted.`;
+}
+
+function downloadIssueFile(content, extension = 'md') {
+  const blob = new Blob([content], { type: extension === 'json' ? 'application/json' : 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  const date = new Date().toISOString().replace(/[.:]/g, '-');
+  anchor.href = url;
+  anchor.download = `issue-report-${date}.${extension}`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+async function handleIssueReport() {
+  if (reportIssueButton) {
+    reportIssueButton.disabled = true;
+  }
+  const logLimit = 80;
+  try {
+    const screenshotDataUrl = await captureArtifactScreenshotBestEffort({ timeoutMs: 1000 });
+    const report = sanitizeIssuePayload({
+      generated_at: new Date().toISOString(),
+      log_limit: logLimit,
+      context: getWorkspaceContextForIssue(),
+      logs: issueLogBuffer.slice(-logLimit),
+      perf: getPerfSnapshotForIssue(),
+      browser: getBrowserSnapshotForIssue(),
+      screenshot_data_url: screenshotDataUrl || null,
+      reproduction_steps_template: [
+        'Open the app and navigate to the affected route.',
+        'Perform the action that caused the bug.',
+        'Observe the incorrect behavior and compare with expected behavior.'
+      ]
+    });
+
+    const markdown = buildIssueMarkdown(report);
+    const reportJson = JSON.stringify(report, null, 2);
+
+    downloadIssueFile(markdown, 'md');
+    downloadIssueFile(reportJson, 'json');
+    await copyToClipboard(markdown);
+    showToast('Issue report captured. Markdown copied + files downloaded.', {
+      variant: 'success',
+      duration: 3200
+    });
+  } catch (error) {
+    console.error('Issue report capture failed.', error);
+    showToast('Unable to capture issue report.', { variant: 'error' });
+  } finally {
+    if (reportIssueButton) {
+      reportIssueButton.disabled = false;
+    }
+  }
+}
+
 
 function updateLineNumbers() {
   if (!lineCountEl) {
@@ -11661,6 +11912,7 @@ window.addEventListener('resize', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+  initializeIssueLogCapture();
   initializePerfHud();
   bootstrapApp();
 });
@@ -11767,6 +12019,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   if (previewHardReloadButton) {
     previewHardReloadButton.addEventListener('click', hardReloadPreview);
+  }
+  if (reportIssueButton) {
+    reportIssueButton.addEventListener('click', () => {
+      handleIssueReport();
+    });
   }
   setFollowEditorEnabled(followEditorEnabled);
   if (previewFollowToggle) {
