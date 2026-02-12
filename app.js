@@ -908,6 +908,80 @@ async function resumeAllAgents() {
   await runWithConcurrencyLimit(agents, MAX_CONCURRENT_RESUMES, resumeOneAgent);
 }
 
+function mapRunStatusToLocalRoot(status) {
+  switch (String(status || '').toUpperCase()) {
+    case 'PREPARING':
+      return AGENT_ROOT_STATES.PREPARING;
+    case 'ACTIVE':
+      return AGENT_ROOT_STATES.ACTIVE;
+    case 'COMPLETED':
+      return AGENT_ROOT_STATES.COMPLETED;
+    case 'FAILED':
+      return AGENT_ROOT_STATES.FAILED;
+    case 'CANCELLED':
+      return AGENT_ROOT_STATES.CANCELLED;
+    default:
+      return AGENT_ROOT_STATES.IDLE;
+  }
+}
+
+function applySyncedRun(run, events = []) {
+  if (!run?.id) {
+    return;
+  }
+  const agent = appMachine.getOrCreateAgent(run.id);
+  agent.root = mapRunStatusToLocalRoot(run.status);
+  agent.active = run.active || agent.active || null;
+  agent.streamPhase = run.phase || agent.streamPhase || null;
+  agent.startedAt = Number(run.started_at || agent.startedAt || Date.now());
+  agent.lastEventAt = Number(run.updated_at || agent.lastEventAt || Date.now());
+  agent.taskId = agent.taskId || run.id;
+  agent.lastEventId = Number(run.last_event_id || agent.lastEventId || 0);
+  if (!Array.isArray(agent.eventLog)) {
+    agent.eventLog = [];
+  }
+  for (const evt of events) {
+    agent.eventLog.push({
+      type: evt.type,
+      timestamp: Number(evt.ts || Date.now()),
+      payload: evt.payload_json || null
+    });
+  }
+  if (agent.eventLog.length > 200) {
+    agent.eventLog = agent.eventLog.slice(-200);
+  }
+}
+
+async function syncRun(runId) {
+  const existingAgent = appMachine.getAgent(runId);
+  const after = Number(existingAgent?.lastEventId || 0);
+  const runPayload = await safeFetchJSON(`/api/agent/runs/${runId}`, { credentials: 'include' }, null);
+  if (!runPayload?.run) {
+    return;
+  }
+  const eventsPayload = await safeFetchJSON(
+    `/api/agent/runs/${runId}/events?after=${after}`,
+    { credentials: 'include' },
+    null
+  );
+  applySyncedRun(runPayload.run, eventsPayload?.events || []);
+  const agent = appMachine.getAgent(runId);
+  if (agent) {
+    agent.lastEventId = Number(eventsPayload?.lastEventId || runPayload.lastEventId || after);
+  }
+}
+
+async function syncAllRuns() {
+  const res = await safeFetchJSON('/api/agent/runs', { credentials: 'include' }, null);
+  const runs = Array.isArray(res?.runs) ? res.runs : [];
+  for (const run of runs) {
+    await syncRun(run.id);
+  }
+  if (runs.length > 0) {
+    appMachine.notify();
+  }
+}
+
 function replayAgentFromLog(agentId) {
   const original = appMachine.getAgent(agentId);
   if (!original || !Array.isArray(original.eventLog)) {
@@ -3588,6 +3662,7 @@ async function bootApp() {
     }
   }
 
+  await syncAllRuns();
   await resumeAllAgents();
 
   appMachine.dispatch(EVENTS.START);

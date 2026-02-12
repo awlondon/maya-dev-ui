@@ -18,11 +18,8 @@ function mapRun(row) {
     status: row.status,
     active: row.active || null,
     phase: row.phase || null,
-    started_at: toMillis(row.started_at),
-    updated_at: toMillis(row.updated_at),
     last_event_id: Number(row.last_event_id || 0),
-    partial_output: null,
-    target: row.target,
+    started_at: row.started_at,
     finished_at: row.finished_at || row.completed_at || null,
     config_json: row.config_json || {},
     created_at: row.created_at

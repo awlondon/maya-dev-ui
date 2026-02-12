@@ -48,10 +48,10 @@ test('centralized schema migration backfills users and keeps usage_events indexe
   assert.match(migration.sql, /CREATE INDEX IF NOT EXISTS usage_events_user_created_idx/i);
 });
 
-test('latest migration includes agent findings schema updates', () => {
+test('latest migration includes agent event log schema updates', () => {
   const last = readMigrations().at(-1);
   assert.ok(last);
-  assert.equal(last.file, '011_agent_findings_and_run_config.sql');
+  assert.equal(last.file, '012_agent_run_events_and_reducer_state.sql');
   assert.match(last.sql, /ALTER TABLE agent_runs/i);
-  assert.match(last.sql, /CREATE TABLE IF NOT EXISTS agent_findings/i);
+  assert.match(last.sql, /CREATE TABLE IF NOT EXISTS agent_events/i);
 });
