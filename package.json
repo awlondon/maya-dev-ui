@@ -14,7 +14,10 @@
     "frontend:build": "npm --prefix pdco-frontend run build",
     "frontend:preview": "npm --prefix pdco-frontend run preview",
     "frontend:lint": "npm --prefix pdco-frontend run lint",
-    "prepare": "husky"
+    "prepare": "husky",
+    "lint": "npm run frontend:lint",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test:e2e": "playwright test ui/tests/auth.rehydrate.spec.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -30,6 +33,7 @@
     "undici": "^6.19.2",
     "eslint": "^9.12.0",
     "prettier": "^3.3.3",
-    "husky": "^9.1.6"
+    "husky": "^9.1.6",
+    "typescript": "^5.6.3"
   }
 }
