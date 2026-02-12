@@ -65,7 +65,8 @@ export function createAgentState(agentId) {
     resumeToken: null,
     partialOutput: '',
     lastEventAt: null,
-    error: null
+    error: null,
+    eventLog: []
   };
 }
 
@@ -121,6 +122,20 @@ export class AppStateMachine {
   applyAgentTransitions(agent, evt) {
     if (!agent || !evt?.type) {
       return false;
+    }
+
+    if (!Array.isArray(agent.eventLog)) {
+      agent.eventLog = [];
+    }
+
+    agent.eventLog.push({
+      type: evt.type,
+      timestamp: Date.now(),
+      payload: evt.payload || null
+    });
+
+    if (agent.eventLog.length > 200) {
+      agent.eventLog.shift();
     }
 
     let changed = false;

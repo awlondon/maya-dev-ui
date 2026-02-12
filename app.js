@@ -9,12 +9,14 @@ import {
   AGENT_ROOT_STATES,
   AGENT_ACTIVE_SUBSTATES,
   AGENT_STREAM_PHASES,
-  EVENTS
+  EVENTS,
+  createAgentState
 } from './core/appStateMachine.js';
 import {
   loadAgentsState,
   migrateLegacyAgentState
 } from './core/persistence.js';
+import { runWithConcurrencyLimit } from './core/concurrency.js';
 
 if (!window.GOOGLE_CLIENT_ID) {
   console.warn('Missing GOOGLE_CLIENT_ID. Google auth disabled.');
@@ -863,20 +865,6 @@ async function resumeAgentStream(resumeToken, signal) {
 
 const MAX_CONCURRENT_RESUMES = 2;
 
-async function runWithConcurrencyLimit(items, limit, runner) {
-  const queue = [...items];
-  const workers = Array.from({ length: Math.max(1, limit) }, async () => {
-    while (queue.length) {
-      const next = queue.shift();
-      if (!next) {
-        break;
-      }
-      await runner(next);
-    }
-  });
-  await Promise.all(workers);
-}
-
 async function resumeOneAgent(agent) {
   if (Date.now() - (agent.startedAt || 0) > MAX_RESUME_AGE) {
     appMachine.dispatch({ type: EVENTS.AGENT_FAIL, agentId: agent.agentId, payload: { error: 'Resume expired' } });
@@ -915,6 +903,20 @@ async function resumeAllAgents() {
   ));
 
   await runWithConcurrencyLimit(agents, MAX_CONCURRENT_RESUMES, resumeOneAgent);
+}
+
+function replayAgentFromLog(agentId) {
+  const original = appMachine.getAgent(agentId);
+  if (!original || !Array.isArray(original.eventLog)) {
+    return null;
+  }
+
+  const replay = createAgentState(agentId);
+  for (const event of original.eventLog) {
+    appMachine.applyAgentTransitions(replay, event);
+  }
+
+  return replay;
 }
 
 function setEditorValue(value = '') {
@@ -3526,12 +3528,42 @@ if (location.hostname === 'localhost') {
   appMachine.subscribe((state) => {
     console.log('App state:', state.app, 'Agents:', state.agents);
   });
+
+  window.debugAgents = () => appMachine.getAllAgents();
+  window.replayAgentFromLog = replayAgentFromLog;
 }
+
+setInterval(() => {
+  const agents = appMachine.getAllAgents();
+  const now = Date.now();
+
+  for (const agent of agents) {
+    if (
+      agent.root === AGENT_ROOT_STATES.ACTIVE
+      && now - (agent.lastEventAt || 0) > 15000
+    ) {
+      console.warn('Agent stalled:', agent.agentId);
+      appMachine.dispatch({
+        type: EVENTS.AGENT_FAIL,
+        agentId: agent.agentId,
+        payload: { error: 'Stalled' }
+      });
+    }
+  }
+}, 5000);
 
 async function bootApp() {
   migrateLegacyAgentState();
   const persistedAgents = loadAgentsState();
   if (persistedAgents?.byId) {
+    for (const [agentId, agent] of Object.entries(persistedAgents.byId)) {
+      persistedAgents.byId[agentId] = {
+        ...createAgentState(agentId),
+        ...agent,
+        eventLog: Array.isArray(agent?.eventLog) ? agent.eventLog : []
+      };
+    }
+
     appMachine.state.agents = persistedAgents;
     if (!appMachine.state.agents.activeAgentId) {
       appMachine.state.agents.activeAgentId = Object.keys(persistedAgents.byId)[0] || null;
