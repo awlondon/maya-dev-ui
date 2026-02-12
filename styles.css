@@ -3740,3 +3740,58 @@ button:disabled {
   align-items: center;
   justify-content: center;
 }
+
+.agent-workspace {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.agent-item {
+  text-align: left;
+  font-size: 12px;
+  padding: 6px;
+  border: 1px solid #444;
+  background: #111;
+  color: #eee;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.agent-item.active {
+  border-color: #66a3ff;
+}
+
+.agent-focus {
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 8px;
+  min-height: 120px;
+  background: #0b0b0b;
+}
+
+.agent-active-label {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-bottom: 6px;
+}
+
+.agent-active-output {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+.agent-empty {
+  font-size: 12px;
+  opacity: 0.7;
+}
