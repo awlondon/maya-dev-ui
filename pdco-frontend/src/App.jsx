@@ -3,13 +3,54 @@ import './App.css';
 
 const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
 const isDev = import.meta.env.DEV;
+const layoutStorageKey = 'pdco.devstudio.layout.v1';
+
+const panelDefinitions = {
+  editor: { title: 'Editor', zone: 'center', allowUndock: false },
+  preview: { title: 'Preview', zone: 'right', allowUndock: true },
+  console: { title: 'Console / Logs', zone: 'bottom', allowUndock: true },
+  files: { title: 'Files', zone: 'left', allowUndock: true },
+  tasks: { title: 'Tasks', zone: 'right', allowUndock: true },
+  settings: { title: 'Settings', zone: 'right', allowUndock: true }
+};
+
 const defaultLayout = {
   left: 280,
   right: 360,
-  sidebarOpen: true,
-  previewOpen: true,
-  dockOpen: true
+  panels: {
+    editor: { visible: true, docked: true },
+    preview: { visible: true, docked: true },
+    console: { visible: true, docked: true },
+    files: { visible: true, docked: true },
+    tasks: { visible: true, docked: true },
+    settings: { visible: false, docked: true }
+  }
 };
+
+function readStoredLayout() {
+  if (typeof window === 'undefined') {
+    return defaultLayout;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(layoutStorageKey);
+    if (!raw) {
+      return defaultLayout;
+    }
+    const parsed = JSON.parse(raw);
+
+    return {
+      ...defaultLayout,
+      ...parsed,
+      panels: {
+        ...defaultLayout.panels,
+        ...(parsed?.panels || {})
+      }
+    };
+  } catch {
+    return defaultLayout;
+  }
+}
 
 function useRenderCounter(name) {
   const countRef = useRef(0);
@@ -33,39 +74,34 @@ const RenderBadge = memo(function RenderBadge({ name }) {
   return <span className="render-badge">renders: {count}</span>;
 });
 
-const Sidebar = memo(function Sidebar({ isOpen, onToggle }) {
+const PanelFrame = memo(function PanelFrame({ id, title, layout, onToggleVisible, onToggleDock, children }) {
+  const isVisible = layout.visible;
   return (
-    <aside className={`panel sidebar ${isOpen ? '' : 'collapsed'}`}>
+    <section className={`panel ${isVisible ? '' : 'panel-hidden'}`}>
       <header className="panel-header">
-        <strong>Sidebar</strong>
-        <button onClick={onToggle}>{isOpen ? 'Hide' : 'Show'}</button>
+        <strong>{title}</strong>
+        <div className="panel-actions">
+          <button onClick={() => onToggleVisible(id)}>{isVisible ? 'Hide' : 'Show'}</button>
+          {panelDefinitions[id].allowUndock && (
+            <button onClick={() => onToggleDock(id)}>{layout.docked ? 'Undock' : 'Dock'}</button>
+          )}
+        </div>
       </header>
-      <RenderBadge name="Sidebar" />
-      {isOpen && <div className="panel-body">Project files, search, and symbols.</div>}
-    </aside>
-  );
-});
-
-const Dock = memo(function Dock({ isOpen, onToggle }) {
-  return (
-    <section className="panel dock">
-      <header className="panel-header">
-        <strong>Dock</strong>
-        <button onClick={onToggle}>{isOpen ? 'Collapse' : 'Expand'}</button>
-      </header>
-      <RenderBadge name="Dock" />
-      {isOpen && <div className="panel-body">Terminal · Problems · Logs</div>}
+      <RenderBadge name={title} />
+      <div className="panel-body">{children}</div>
     </section>
   );
 });
 
-const EditorPanel = memo(function EditorPanel({ value, onChange }) {
+const EditorPanel = memo(function EditorPanel({ value, onChange, panelLayout, onToggleVisible }) {
   return (
-    <section className="panel editor-panel">
-      <header className="panel-header">
-        <strong>Editor</strong>
-      </header>
-      <RenderBadge name="Editor" />
+    <PanelFrame
+      id="editor"
+      title={panelDefinitions.editor.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={() => {}}
+    >
       <textarea
         className="editor-input"
         value={value}
@@ -73,62 +109,162 @@ const EditorPanel = memo(function EditorPanel({ value, onChange }) {
         spellCheck={false}
         placeholder="Type code here..."
       />
-    </section>
+    </PanelFrame>
   );
 });
 
-const PreviewPanel = memo(function PreviewPanel({ isOpen, onToggle }) {
-  const previewText = useMemo(
-    () => `API base URL: ${apiUrl}`,
-    []
-  );
-
+const PreviewPanel = memo(function PreviewPanel({ panelLayout, onToggleVisible, onToggleDock }) {
+  const previewText = useMemo(() => `API base URL: ${apiUrl}`, []);
   return (
-    <section className={`panel preview-panel ${isOpen ? '' : 'collapsed'}`}>
-      <header className="panel-header">
-        <strong>Preview</strong>
-        <button onClick={onToggle}>{isOpen ? 'Hide' : 'Show'}</button>
-      </header>
-      <RenderBadge name="Preview" />
-      {isOpen && <div className="panel-body">{previewText}</div>}
-    </section>
+    <PanelFrame
+      id="preview"
+      title={panelDefinitions.preview.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={onToggleDock}
+    >
+      {previewText}
+    </PanelFrame>
+  );
+});
+
+const ConsolePanel = memo(function ConsolePanel({ panelLayout, onToggleVisible, onToggleDock }) {
+  const [logs] = useState(['Build started…', 'Dev server ready on :5173', '0 errors · 0 warnings']);
+  return (
+    <PanelFrame
+      id="console"
+      title={panelDefinitions.console.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={onToggleDock}
+    >
+      {logs.map((line) => (
+        <div key={line}>{line}</div>
+      ))}
+    </PanelFrame>
+  );
+});
+
+const FilesPanel = memo(function FilesPanel({ panelLayout, onToggleVisible, onToggleDock }) {
+  const [filter, setFilter] = useState('');
+  return (
+    <PanelFrame
+      id="files"
+      title={panelDefinitions.files.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={onToggleDock}
+    >
+      <input className="panel-input" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter files…" />
+      <div>app.js</div>
+      <div>editorManager.js</div>
+      <div>sandboxController.js</div>
+    </PanelFrame>
+  );
+});
+
+const TasksPanel = memo(function TasksPanel({ panelLayout, onToggleVisible, onToggleDock }) {
+  const [draft, setDraft] = useState('Implement smoke test');
+  return (
+    <PanelFrame
+      id="tasks"
+      title={panelDefinitions.tasks.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={onToggleDock}
+    >
+      <input className="panel-input" value={draft} onChange={(event) => setDraft(event.target.value)} />
+      <div>Open tasks: 3</div>
+    </PanelFrame>
+  );
+});
+
+const SettingsPanel = memo(function SettingsPanel({ panelLayout, onToggleVisible, onToggleDock }) {
+  const [safeMode, setSafeMode] = useState(true);
+  return (
+    <PanelFrame
+      id="settings"
+      title={panelDefinitions.settings.title}
+      layout={panelLayout}
+      onToggleVisible={onToggleVisible}
+      onToggleDock={onToggleDock}
+    >
+      <label className="settings-toggle">
+        <input type="checkbox" checked={safeMode} onChange={(event) => setSafeMode(event.target.checked)} />
+        Safe mode rollout
+      </label>
+    </PanelFrame>
   );
 });
 
 function App() {
-  const [layout, setLayout] = useState(defaultLayout);
+  const [layout, setLayout] = useState(() => readStoredLayout());
   const [editorValue, setEditorValue] = useState('<h1>PDCo Dev Studio</h1>');
   const shellRef = useRef(null);
   const dragRef = useRef({ active: false, side: null, value: 0 });
 
+  const hasLeftPanel = layout.panels.files.visible && layout.panels.files.docked;
+  const hasRightPanel = ['preview', 'tasks', 'settings'].some((id) => layout.panels[id].visible && layout.panels[id].docked);
+  const dockIsVisible = layout.panels.console.visible && layout.panels.console.docked;
+
   const shellStyle = useMemo(
     () => ({
-      '--left-width': `${layout.sidebarOpen ? layout.left : 48}px`,
-      '--right-width': `${layout.previewOpen ? layout.right : 48}px`,
-      '--dock-height': layout.dockOpen ? '150px' : '40px'
+      '--left-width': `${hasLeftPanel ? layout.left : 48}px`,
+      '--right-width': `${hasRightPanel ? layout.right : 48}px`,
+      '--dock-height': dockIsVisible ? '180px' : '40px'
     }),
-    [layout]
+    [dockIsVisible, hasLeftPanel, hasRightPanel, layout.left, layout.right]
   );
 
-  const updateLayout = useCallback((patch) => {
-    setLayout((current) => ({ ...current, ...patch }));
-  }, []);
+  useEffect(() => {
+    window.localStorage.setItem(layoutStorageKey, JSON.stringify(layout));
+  }, [layout]);
 
   const onEditorChange = useCallback((event) => {
     setEditorValue(event.target.value);
   }, []);
 
-  const toggleSidebar = useCallback(() => {
-    updateLayout({ sidebarOpen: !layout.sidebarOpen });
-  }, [layout.sidebarOpen, updateLayout]);
+  const togglePanelVisible = useCallback((panelId) => {
+    setLayout((current) => ({
+      ...current,
+      panels: {
+        ...current.panels,
+        [panelId]: {
+          ...current.panels[panelId],
+          visible: !current.panels[panelId].visible
+        }
+      }
+    }));
+  }, []);
 
-  const togglePreview = useCallback(() => {
-    updateLayout({ previewOpen: !layout.previewOpen });
-  }, [layout.previewOpen, updateLayout]);
+  const togglePanelDock = useCallback((panelId) => {
+    setLayout((current) => ({
+      ...current,
+      panels: {
+        ...current.panels,
+        [panelId]: {
+          ...current.panels[panelId],
+          docked: !current.panels[panelId].docked,
+          visible: true
+        }
+      }
+    }));
+  }, []);
 
-  const toggleDock = useCallback(() => {
-    updateLayout({ dockOpen: !layout.dockOpen });
-  }, [layout.dockOpen, updateLayout]);
+  const resetLayout = useCallback(() => {
+    setLayout(defaultLayout);
+  }, []);
+
+  const exportLayout = useCallback(() => {
+    const layoutJson = JSON.stringify(layout, null, 2);
+    const blob = new Blob([layoutJson], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'pdco-layout.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [layout]);
 
   const onDividerStart = useCallback((side) => (event) => {
     dragRef.current = {
@@ -169,7 +305,7 @@ function App() {
       }
       const { side, value } = dragRef.current;
       dragRef.current = { active: false, side: null, value: 0 };
-      updateLayout(side === 'left' ? { left: value } : { right: value });
+      setLayout((current) => ({ ...current, ...(side === 'left' ? { left: value } : { right: value }) }));
     };
 
     window.addEventListener('mousemove', onMove);
@@ -179,21 +315,58 @@ function App() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [updateLayout]);
+  }, []);
+
+  const floatingPanels = Object.keys(layout.panels).filter((id) => id !== 'editor' && layout.panels[id].visible && !layout.panels[id].docked);
 
   return (
-    <main className="workspace-shell" ref={shellRef} style={shellStyle}>
-      <Sidebar isOpen={layout.sidebarOpen} onToggle={toggleSidebar} />
-      <div className="divider" onMouseDown={onDividerStart('left')} />
+    <>
+      <div className="workspace-toolbar">
+        <strong>Workspace Layout</strong>
+        <button onClick={resetLayout}>Reset layout</button>
+        <button onClick={exportLayout}>Export layout JSON</button>
+      </div>
 
-      <section className="center-column">
-        <EditorPanel value={editorValue} onChange={onEditorChange} />
-        <Dock isOpen={layout.dockOpen} onToggle={toggleDock} />
-      </section>
+      <main className="workspace-shell" ref={shellRef} style={shellStyle}>
+        <div className="left-column">
+          <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+        </div>
+        <div className="divider" onMouseDown={onDividerStart('left')} />
 
-      <div className="divider" onMouseDown={onDividerStart('right')} />
-      <PreviewPanel isOpen={layout.previewOpen} onToggle={togglePreview} />
-    </main>
+        <section className="center-column">
+          <EditorPanel value={editorValue} onChange={onEditorChange} panelLayout={layout.panels.editor} onToggleVisible={togglePanelVisible} />
+          <ConsolePanel panelLayout={layout.panels.console} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+        </section>
+
+        <div className="divider" onMouseDown={onDividerStart('right')} />
+
+        <section className="right-column">
+          <PreviewPanel panelLayout={layout.panels.preview} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          <TasksPanel panelLayout={layout.panels.tasks} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          <SettingsPanel panelLayout={layout.panels.settings} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+        </section>
+      </main>
+
+      {!!floatingPanels.length && (
+        <aside className="floating-area">
+          {floatingPanels.includes('preview') && (
+            <PreviewPanel panelLayout={layout.panels.preview} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          )}
+          {floatingPanels.includes('console') && (
+            <ConsolePanel panelLayout={layout.panels.console} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          )}
+          {floatingPanels.includes('files') && (
+            <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          )}
+          {floatingPanels.includes('tasks') && (
+            <TasksPanel panelLayout={layout.panels.tasks} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          )}
+          {floatingPanels.includes('settings') && (
+            <SettingsPanel panelLayout={layout.panels.settings} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          )}
+        </aside>
+      )}
+    </>
   );
 }
 
