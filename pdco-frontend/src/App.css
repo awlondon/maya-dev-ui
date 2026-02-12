@@ -1,15 +1,82 @@
-.app-shell {
-  max-width: 720px;
-  margin: 48px auto;
-  padding: 24px;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  font-family: Inter, Arial, sans-serif;
-  line-height: 1.5;
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
 }
 
-code {
-  background: #f3f4f6;
-  padding: 2px 6px;
+body {
+  margin: 0;
+  background: #10131f;
+  color: #e9edf7;
+}
+
+.workspace-shell {
+  --left-width: 280px;
+  --right-width: 360px;
+  --dock-height: 150px;
+  display: grid;
+  grid-template-columns: var(--left-width) 8px 1fr 8px var(--right-width);
+  gap: 0;
+  height: 100vh;
+}
+
+.center-column {
+  display: grid;
+  grid-template-rows: 1fr var(--dock-height);
+  min-width: 380px;
+}
+
+.panel {
+  background: #171b2b;
+  border: 1px solid #242b46;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid #242b46;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #131727;
+}
+
+.panel-body {
+  padding: 12px;
+  color: #b7bfd8;
+}
+
+.editor-input {
+  width: calc(100% - 24px);
+  margin: 12px;
+  min-height: calc(100% - 24px);
+  resize: none;
+  background: #111526;
+  color: #ecf2ff;
+  border: 1px solid #2d375a;
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.divider {
+  cursor: col-resize;
+  background: #222948;
+}
+
+button {
+  border: 1px solid #324075;
+  background: #1b2445;
+  color: #dfe7ff;
   border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.collapsed .panel-body {
+  display: none;
+}
+
+.render-badge {
+  font-size: 12px;
+  color: #7f8cbb;
+  padding: 0 12px;
 }
