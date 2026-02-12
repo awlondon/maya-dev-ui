@@ -100,6 +100,9 @@ function safeStorageClear(storage) {
 }
 
 const unsupportedApiEndpoints = new Set();
+const inflightReadRequests = new Map();
+const readResponseCache = new Map();
+const DEFAULT_READ_CACHE_TTL_MS = 20_000;
 const agentSyncManager = createAgentSyncManager({ apiBase: API_BASE, appMachine });
 
 async function fetchOptionalApi(path, options = {}) {
@@ -107,16 +110,61 @@ async function fetchOptionalApi(path, options = {}) {
   if (!endpointKey || unsupportedApiEndpoints.has(endpointKey)) {
     return null;
   }
-  try {
-    const response = await fetch(`${API_BASE}${path}`, options);
-    if (response.status === 404 || response.status === 405 || response.status === 501) {
-      unsupportedApiEndpoints.add(endpointKey);
-      console.info(`API endpoint not available: ${endpointKey}`);
-      return null;
+  const {
+    cacheTtlMs = DEFAULT_READ_CACHE_TTL_MS,
+    skipCache = false,
+    dedupe = true,
+    ...fetchOptions
+  } = options || {};
+  const method = (fetchOptions.method || 'GET').toUpperCase();
+  const shouldCache = method === 'GET' && cacheTtlMs > 0;
+  const requestKey = `${method}:${path}`;
+  if (shouldCache && !skipCache) {
+    const cached = readResponseCache.get(requestKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.response.clone();
     }
-    return response;
-  } catch (error) {
-    console.warn(`Network error for ${path}`, error);
+    if (cached) {
+      readResponseCache.delete(requestKey);
+    }
+  }
+  if (method === 'GET' && dedupe && inflightReadRequests.has(requestKey)) {
+    const inflightResponse = await inflightReadRequests.get(requestKey);
+    return inflightResponse ? inflightResponse.clone() : null;
+  }
+
+  const requestPromise = (async () => {
+    try {
+      const response = await fetch(`${API_BASE}${path}`, fetchOptions);
+      if (response.status === 404 || response.status === 405 || response.status === 501) {
+        unsupportedApiEndpoints.add(endpointKey);
+        console.info(`API endpoint not available: ${endpointKey}`);
+        return null;
+      }
+      if (shouldCache && response.ok) {
+        readResponseCache.set(requestKey, {
+          expiresAt: Date.now() + cacheTtlMs,
+          response: response.clone()
+        });
+      }
+      return response;
+    } catch (error) {
+      console.warn(`Network error for ${path}`, error);
+      return null;
+    } finally {
+      if (method === 'GET') {
+        inflightReadRequests.delete(requestKey);
+      }
+    }
+  })();
+
+  if (method === 'GET' && dedupe) {
+    inflightReadRequests.set(requestKey, requestPromise);
+  }
+
+  try {
+    return await requestPromise;
+  } catch {
     return null;
   }
 }
@@ -2013,11 +2061,21 @@ const SESSION_CODE_STORE_NAME = 'code_versions';
 const SESSION_EDITOR_STORE_NAME = 'editor_state';
 const SESSION_ARTIFACTS_STORE_NAME = 'artifacts';
 const SESSION_KV_STORE_NAME = 'local_kv';
-const SESSION_STATE_PERSIST_DEBOUNCE_MS = 500;
+const SESSION_STATE_PERSIST_DEBOUNCE_MS = Number.parseInt(
+  window.__MAYA_AUTOSAVE_DEBOUNCE_MS || '',
+  10
+) || 750;
+const SESSION_STATE_PERSIST_MIN_INTERVAL_MS = Number.parseInt(
+  window.__MAYA_AUTOSAVE_MIN_INTERVAL_MS || '',
+  10
+) || 1500;
 
 let sessionState = null;
 let sessionStatePersistTimer = null;
 let sessionStateDbPromise = null;
+let sessionStatePersistInFlight = false;
+let sessionStatePersistQueued = false;
+let lastSessionPersistAt = 0;
 
 function requestToPromise(request, fallback = null) {
   return new Promise((resolve) => {
@@ -2356,10 +2414,20 @@ function normalizeSessionState(raw) {
   };
 }
 
-function persistSessionStateNow() {
+async function persistSessionStateNow({ respectMinInterval = false } = {}) {
   if (!sessionState) {
     return;
   }
+  if (sessionStatePersistInFlight) {
+    sessionStatePersistQueued = true;
+    return;
+  }
+  const elapsed = Date.now() - lastSessionPersistAt;
+  if (respectMinInterval && elapsed < SESSION_STATE_PERSIST_MIN_INTERVAL_MS) {
+    scheduleSessionStatePersist();
+    return;
+  }
+
   const payload = {
     schema_version: SESSION_STATE_SCHEMA_VERSION,
     saved_at: new Date().toISOString(),
@@ -2373,18 +2441,34 @@ function persistSessionStateNow() {
       bytes: payloadSize
     });
   }
-  persistSessionStateToServer(payload);
-  saveSessionSnapshotToIndexedDb(sessionState);
+
+  sessionStatePersistInFlight = true;
+  sessionStatePersistQueued = false;
+  await Promise.allSettled([
+    persistSessionStateToServer(payload),
+    saveSessionSnapshotToIndexedDb(sessionState)
+  ]);
+  lastSessionPersistAt = Date.now();
+  sessionStatePersistInFlight = false;
+
+  if (sessionStatePersistQueued) {
+    scheduleSessionStatePersist();
+  }
 }
 
 function scheduleSessionStatePersist() {
+  sessionStatePersistQueued = true;
   if (sessionStatePersistTimer) {
     clearTimeout(sessionStatePersistTimer);
   }
+  const now = Date.now();
+  const elapsed = now - lastSessionPersistAt;
+  const minIntervalDelay = Math.max(0, SESSION_STATE_PERSIST_MIN_INTERVAL_MS - elapsed);
+  const delay = Math.max(SESSION_STATE_PERSIST_DEBOUNCE_MS, minIntervalDelay);
   sessionStatePersistTimer = setTimeout(() => {
-    persistSessionStateNow();
     sessionStatePersistTimer = null;
-  }, SESSION_STATE_PERSIST_DEBOUNCE_MS);
+    persistSessionStateNow({ respectMinInterval: true });
+  }, delay);
 }
 
 async function loadSessionStateFromServer(id = '') {
@@ -2395,7 +2479,8 @@ async function loadSessionStateFromServer(id = '') {
   try {
     const response = await fetchOptionalApi(`/api/session/state${query}`, {
       method: 'GET',
-      credentials: 'include'
+      credentials: 'include',
+      cacheTtlMs: 10_000
     });
     if (!response?.ok) {
       return null;
@@ -3437,7 +3522,7 @@ function setRoute(path) {
 async function hydrateSessionFromServer() {
   try {
     const res = await fetch(`${API_BASE}/api/me`, { credentials: 'include' });
-    if (res.ok) {
+    if (res?.ok) {
       return await res.json();
     }
     if (res.status === 401) {
@@ -4369,8 +4454,12 @@ function buildAvatarPlaceholder(initials) {
 }
 
 async function fetchArtifacts(path) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
-  if (!res.ok) {
+  const res = await fetchOptionalApi(path, {
+    method: 'GET',
+    credentials: 'include',
+    cacheTtlMs: 30_000
+  });
+  if (!res?.ok) {
     throw new Error('Failed to load artifacts');
   }
   const data = await res.json();
@@ -4610,8 +4699,12 @@ async function loadAccountArtifactSummary() {
 }
 
 async function fetchPublicProfile(handle) {
-  const res = await fetch(`${API_BASE}/api/profile/${handle}`, { credentials: 'include' });
-  if (!res.ok) {
+  const res = await fetchOptionalApi(`/api/profile/${handle}`, {
+    method: 'GET',
+    credentials: 'include',
+    cacheTtlMs: 30_000
+  });
+  if (!res?.ok) {
     throw new Error('Profile fetch failed');
   }
   const data = await res.json();
@@ -4619,12 +4712,16 @@ async function fetchPublicProfile(handle) {
 }
 
 async function fetchCurrentProfile() {
-  const res = await fetch(`${API_BASE}/api/profile`, { credentials: 'include' });
-  if (res.ok) {
+  const res = await fetchOptionalApi('/api/profile', {
+    method: 'GET',
+    credentials: 'include',
+    cacheTtlMs: 30_000
+  });
+  if (res?.ok) {
     const data = await res.json();
     return data?.profile || data;
   }
-  if (res.status === 404) {
+  if (res?.status === 404) {
     return null;
   }
   throw new Error('Profile fetch failed');
@@ -4768,11 +4865,15 @@ async function checkHandleAvailability(handle, currentHandle) {
     return { available: true, message: handle ? 'Handle is unchanged.' : '' };
   }
   try {
-    const res = await fetch(`${API_BASE}/api/profile/${handle}`, { credentials: 'include' });
-    if (res.status === 404) {
+    const res = await fetchOptionalApi(`/api/profile/${handle}`, {
+      method: 'GET',
+      credentials: 'include',
+      cacheTtlMs: 30_000
+    });
+    if (res?.status === 404) {
       return { available: true, message: 'Handle is available.' };
     }
-    if (res.ok) {
+    if (res?.ok) {
       return { available: false, message: 'Handle is already taken.' };
     }
   } catch (error) {
@@ -5450,6 +5551,40 @@ function findArtifactInState(id) {
   );
 }
 
+function updateArtifactMetadataInCollections(artifactId, metadata) {
+  if (!artifactId || !metadata) {
+    return;
+  }
+  const applyPatch = (artifact) => (
+    artifact?.artifact_id === artifactId
+      ? {
+        ...artifact,
+        title: metadata.title,
+        description: metadata.description,
+        tags: Array.isArray(metadata.tags) ? metadata.tags : artifact.tags,
+        category: metadata.category
+      }
+      : artifact
+  );
+  galleryState.privateArtifacts = galleryState.privateArtifacts.map(applyPatch);
+  galleryState.publicArtifacts = galleryState.publicArtifacts.map(applyPatch);
+  profileState.artifacts = profileState.artifacts.map(applyPatch);
+  profileState.forks = profileState.forks.map(applyPatch);
+}
+
+function renderArtifactCollections() {
+  if (galleryGrid) {
+    galleryGrid.innerHTML = renderGalleryCards(galleryState.privateArtifacts, { mode: 'private' });
+    galleryEmpty?.classList.toggle('hidden', galleryState.privateArtifacts.length > 0);
+  }
+  if (publicGalleryGrid) {
+    publicGalleryGrid.innerHTML = renderGalleryCards(galleryState.publicArtifacts, { mode: 'public' });
+    publicGalleryEmpty?.classList.toggle('hidden', galleryState.publicArtifacts.length > 0);
+  }
+  renderProfileArtifacts(profileState.artifacts);
+  renderProfileForks(profileState.forks);
+}
+
 async function handleArtifactOpen(artifactId) {
   const currentArtifact = findArtifactInState(artifactId);
   if (!currentArtifact) {
@@ -5493,23 +5628,32 @@ async function handleArtifactEdit(artifactId) {
     const descriptionInput = document.getElementById('artifactEditDescription');
     const tagsInput = document.getElementById('artifactEditTags');
     const categoryInput = document.getElementById('artifactEditCategory');
+    const metadataPatch = {
+      title: titleInput?.value.trim() || currentArtifact.title,
+      description: descriptionInput?.value.trim() || currentArtifact.description,
+      tags: parseTagsInput(tagsInput?.value || ''),
+      category: categoryInput?.value.trim() || currentArtifact.category || 'general'
+    };
+    const previousArtifact = { ...currentArtifact };
+    updateArtifactMetadataInCollections(artifactId, metadataPatch);
+    renderArtifactCollections();
+    ModalManager.close();
     try {
-      await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+      const response = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: titleInput?.value.trim() || currentArtifact.title,
-          description: descriptionInput?.value.trim() || currentArtifact.description,
-          tags: parseTagsInput(tagsInput?.value || ''),
-          category: categoryInput?.value.trim() || currentArtifact.category || 'general'
-        })
+        body: JSON.stringify(metadataPatch)
       });
-      ModalManager.close();
+      if (!response.ok) {
+        throw new Error('Artifact update rejected');
+      }
       await loadPrivateGallery();
       await loadAccountArtifactSummary();
       showToast('Artifact updated.', { variant: 'success', duration: 2000 });
     } catch (error) {
+      updateArtifactMetadataInCollections(artifactId, previousArtifact);
+      renderArtifactCollections();
       console.error('Artifact update failed.', error);
       showToast('Unable to update artifact.');
     }
@@ -6616,7 +6760,9 @@ function renderPaywallPlans(plans) {
 async function hydratePlanCatalog() {
   try {
     const res = await fetchOptionalApi('/api/plans', {
-      credentials: 'include'
+      method: 'GET',
+      credentials: 'include',
+      cacheTtlMs: 120_000
     });
     if (!res) {
       throw new Error('plans endpoint unavailable');
@@ -6867,8 +7013,10 @@ async function fetchUsageAnalytics({ force = false } = {}) {
   try {
     const res = await withTimeout(
       fetchOptionalApi('/api/usage/overview', {
+        method: 'GET',
         cache: 'no-store',
-        credentials: 'include'
+        credentials: 'include',
+        cacheTtlMs: ANALYTICS_CACHE_TTL_MS
       }),
       ANALYTICS_TIMEOUT_MS,
       'Analytics request timed out'
@@ -7764,7 +7912,7 @@ async function downloadSessionExport(summary, format) {
     const res = await fetch(`${API_BASE}/api/session/export/${encodeURIComponent(summary.session_id)}`, {
       credentials: 'include'
     });
-    if (res.ok) {
+    if (res?.ok) {
       payload = await res.json().catch(() => null);
     }
   } catch (error) {
