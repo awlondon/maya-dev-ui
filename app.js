@@ -608,13 +608,9 @@ function ensurePlayableButtonPresence() {
     return null;
   }
 
-  let wrapper = chatControls.querySelector('.playable-wrapper-container');
-  if (!wrapper) {
-    wrapper = document.createElement('div');
-    wrapper.className = 'playable-wrapper-container';
-    chatControls.insertBefore(wrapper, chatInputRow);
-  } else if (wrapper.nextElementSibling !== chatInputRow) {
-    chatControls.insertBefore(wrapper, chatInputRow);
+  const sendButton = chatInputRow.querySelector('#btn-send');
+  if (!sendButton) {
+    return null;
   }
 
   let playableButton = document.getElementById('playable-controller-btn');
@@ -649,11 +645,15 @@ function ensurePlayableButtonPresence() {
   stopButton.style.display = 'inline-flex';
   stopButton.style.visibility = 'visible';
 
-  if (playableButton.parentElement !== wrapper) {
-    wrapper.appendChild(playableButton);
+  if (playableButton.parentElement !== chatInputRow) {
+    chatInputRow.insertBefore(playableButton, sendButton.nextSibling);
   }
-  if (stopButton.parentElement !== wrapper) {
-    wrapper.appendChild(stopButton);
+  if (playableButton.previousElementSibling !== sendButton) {
+    chatInputRow.insertBefore(playableButton, sendButton.nextSibling);
+  }
+
+  if (stopButton.parentElement !== chatInputRow) {
+    chatInputRow.insertBefore(stopButton, playableButton.nextSibling);
   }
 
   return playableButton;

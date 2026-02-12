@@ -449,7 +449,13 @@
               <span class="timer">0.0s</span>
             </div>
             <div class="chat-controls">
-              <div class="playable-wrapper-container">
+              <div class="chat-input-row">
+                <div class="chat-input-wrapper">
+                  <textarea id="chat-input" placeholder="Describe what you want to build or change."></textarea>
+                  <div id="credit-preview" class="credit-preview" aria-live="polite"></div>
+                </div>
+                <button id="btn-mic" title="Speak" type="button">🎙️</button>
+                <button id="btn-send" type="submit">Send Chat</button>
                 <button
                   id="playable-controller-btn"
                   class="playable-btn"
@@ -461,15 +467,6 @@
                   <span class="playable-btn-icon" aria-hidden="true">🎮</span>
                   <span class="playable-btn-label">Game mode</span>
                 </button>
-              </div>
-
-              <div class="chat-input-row">
-                <div class="chat-input-wrapper">
-                  <textarea id="chat-input" placeholder="Describe what you want to build or change."></textarea>
-                  <div id="credit-preview" class="credit-preview" aria-live="polite"></div>
-                </div>
-                <button id="btn-mic" title="Speak" type="button">🎙️</button>
-                <button id="btn-send" type="submit">Send Chat</button>
               </div>
             </div>
             <div id="agent-workspace" class="agent-workspace">

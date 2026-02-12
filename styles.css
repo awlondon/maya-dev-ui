@@ -1613,18 +1613,6 @@ html, body {
 
 .chat-controls {
   width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.playable-wrapper-container {
-  display: flex;
-  justify-content: flex-start;
-  gap: 8px;
-  width: 100%;
-  min-height: 40px;
 }
 
 #playable-controller-btn {
@@ -1632,14 +1620,18 @@ html, body {
   opacity: 1 !important;
   pointer-events: auto;
   min-height: 40px;
+  margin-left: 6px;
 }
 
 .chat-input-row {
   width: 100%;
   display: flex;
-  align-items: flex-end;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
 }
+
 
 #btn-mic.listening {
   color: var(--error);
