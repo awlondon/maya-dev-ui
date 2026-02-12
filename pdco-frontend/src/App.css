@@ -8,20 +8,42 @@ body {
   color: #e9edf7;
 }
 
+.workspace-toolbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #242b46;
+  padding: 0 12px;
+  background: #0f1322;
+}
+
 .workspace-shell {
   --left-width: 280px;
   --right-width: 360px;
-  --dock-height: 150px;
+  --dock-height: 180px;
   display: grid;
   grid-template-columns: var(--left-width) 8px 1fr 8px var(--right-width);
   gap: 0;
-  height: 100vh;
+  height: calc(100vh - 44px);
+}
+
+.left-column,
+.right-column {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
 }
 
 .center-column {
   display: grid;
   grid-template-rows: 1fr var(--dock-height);
   min-width: 380px;
+  min-height: 0;
+  gap: 8px;
+  padding: 8px;
 }
 
 .panel {
@@ -31,18 +53,42 @@ body {
   overflow: hidden;
 }
 
+.panel-hidden {
+  opacity: 0.6;
+}
+
 .panel-header {
   padding: 10px 12px;
   border-bottom: 1px solid #242b46;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   background: #131727;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .panel-body {
   padding: 12px;
   color: #b7bfd8;
+}
+
+.panel-hidden .panel-body {
+  display: none;
+}
+
+.panel-input {
+  width: 100%;
+  margin-bottom: 8px;
+  background: #111526;
+  color: #ecf2ff;
+  border: 1px solid #2d375a;
+  border-radius: 8px;
+  padding: 8px;
 }
 
 .editor-input {
@@ -71,12 +117,26 @@ button {
   padding: 4px 8px;
 }
 
-.collapsed .panel-body {
-  display: none;
-}
-
 .render-badge {
   font-size: 12px;
   color: #7f8cbb;
   padding: 0 12px;
+}
+
+.floating-area {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: min(360px, 92vw);
+  max-height: 72vh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  z-index: 100;
+}
+
+.settings-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
