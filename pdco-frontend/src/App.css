@@ -140,3 +140,42 @@ button {
   gap: 8px;
   align-items: center;
 }
+
+.artifact-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+  margin-bottom: 10px;
+}
+
+.artifact-row {
+  display: grid;
+  text-align: left;
+  gap: 2px;
+}
+
+.artifact-row-selected {
+  border-color: #7d9cff;
+}
+
+.artifact-details {
+  border-top: 1px solid #2d375a;
+  padding-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.import-label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
