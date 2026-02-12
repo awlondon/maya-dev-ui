@@ -1,5 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
+import {
+  artifactExtension,
+  createBlogEmbedHelpers,
+  exportArtifactsPack,
+  importArtifactsPack,
+  readArtifacts,
+  saveArtifact
+} from './artifactsStore';
 
 const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
 const isDev = import.meta.env.DEV;
@@ -145,8 +153,90 @@ const ConsolePanel = memo(function ConsolePanel({ panelLayout, onToggleVisible, 
   );
 });
 
-const FilesPanel = memo(function FilesPanel({ panelLayout, onToggleVisible, onToggleDock }) {
+const FilesPanel = memo(function FilesPanel({ panelLayout, onToggleVisible, onToggleDock, editorValue }) {
   const [filter, setFilter] = useState('');
+  const [artifactName, setArtifactName] = useState('');
+  const [artifactType, setArtifactType] = useState('text/html');
+  const [artifactTags, setArtifactTags] = useState('demo');
+  const [artifactSource, setArtifactSource] = useState('manual');
+  const [artifacts, setArtifacts] = useState(() => readArtifacts());
+  const [selectedArtifactId, setSelectedArtifactId] = useState('');
+
+  const filteredArtifacts = useMemo(() => {
+    const search = filter.trim().toLowerCase();
+    if (!search) {
+      return artifacts;
+    }
+    return artifacts.filter((artifact) => {
+      const text = `${artifact.name} ${artifact.type} ${artifact.tags.join(' ')}`.toLowerCase();
+      return text.includes(search);
+    });
+  }, [artifacts, filter]);
+
+  const selectedArtifact = artifacts.find((artifact) => artifact.id === selectedArtifactId) || filteredArtifacts[0] || null;
+
+  const saveCurrentArtifact = useCallback(() => {
+    const record = saveArtifact({
+      name: artifactName || `Artifact ${new Date().toLocaleString()}`,
+      type: artifactType,
+      source: artifactSource,
+      content: editorValue,
+      tags: artifactTags
+    });
+    setArtifacts(readArtifacts());
+    setSelectedArtifactId(record.id);
+  }, [artifactName, artifactSource, artifactTags, artifactType, editorValue]);
+
+  const downloadBlob = useCallback((blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const exportSelectedArtifact = useCallback(() => {
+    if (!selectedArtifact) {
+      return;
+    }
+    const extension = artifactExtension(selectedArtifact.type);
+    downloadBlob(new Blob([selectedArtifact.content], { type: selectedArtifact.type }), `${selectedArtifact.name}.${extension}`);
+  }, [downloadBlob, selectedArtifact]);
+
+  const exportArtifactBundle = useCallback(() => {
+    const payload = exportArtifactsPack(artifacts);
+    downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), 'project-artifacts-pack.json');
+  }, [artifacts, downloadBlob]);
+
+  const importArtifactBundle = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const result = importArtifactsPack(payload);
+      if (result.ok) {
+        const nextArtifacts = readArtifacts();
+        setArtifacts(nextArtifacts);
+        setSelectedArtifactId(nextArtifacts[0]?.id || '');
+      }
+    } catch {
+      // Invalid pack; ignored.
+    }
+    event.target.value = '';
+  }, []);
+
+  const copyHelper = useCallback(async (mode) => {
+    if (!selectedArtifact) {
+      return;
+    }
+    const helpers = createBlogEmbedHelpers(selectedArtifact);
+    await navigator.clipboard.writeText(mode === 'iframe' ? helpers.iframe : helpers.markdown);
+  }, [selectedArtifact]);
+
   return (
     <PanelFrame
       id="files"
@@ -155,10 +245,47 @@ const FilesPanel = memo(function FilesPanel({ panelLayout, onToggleVisible, onTo
       onToggleVisible={onToggleVisible}
       onToggleDock={onToggleDock}
     >
-      <input className="panel-input" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter files…" />
-      <div>app.js</div>
-      <div>editorManager.js</div>
-      <div>sandboxController.js</div>
+      <input className="panel-input" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter artifacts…" />
+      <input className="panel-input" value={artifactName} onChange={(event) => setArtifactName(event.target.value)} placeholder="Artifact name" />
+      <input className="panel-input" value={artifactType} onChange={(event) => setArtifactType(event.target.value)} placeholder="Artifact type (e.g. image/svg+xml)" />
+      <input className="panel-input" value={artifactTags} onChange={(event) => setArtifactTags(event.target.value)} placeholder="Tags (comma-separated)" />
+      <select className="panel-input" value={artifactSource} onChange={(event) => setArtifactSource(event.target.value)}>
+        <option value="manual">manual</option>
+        <option value="agent">agent</option>
+      </select>
+      <div className="artifact-actions">
+        <button onClick={saveCurrentArtifact}>Save from editor</button>
+        <button onClick={exportSelectedArtifact} disabled={!selectedArtifact}>Export selected</button>
+        <button onClick={exportArtifactBundle} disabled={!artifacts.length}>Export bundle (JSON)</button>
+      </div>
+      <label className="import-label">
+        Import bundle
+        <input type="file" accept="application/json" onChange={importArtifactBundle} />
+      </label>
+
+      <div className="artifact-list">
+        {filteredArtifacts.map((artifact) => (
+          <button
+            key={artifact.id}
+            className={`artifact-row ${artifact.id === selectedArtifact?.id ? 'artifact-row-selected' : ''}`}
+            onClick={() => setSelectedArtifactId(artifact.id)}
+          >
+            <strong>{artifact.name}</strong>
+            <small>{artifact.type} · {artifact.source}</small>
+          </button>
+        ))}
+      </div>
+
+      {selectedArtifact && (
+        <div className="artifact-details">
+          <div><strong>Created:</strong> {new Date(selectedArtifact.created_at).toLocaleString()}</div>
+          <div><strong>Tags:</strong> {selectedArtifact.tags.join(', ') || 'none'}</div>
+          <div className="artifact-actions">
+            <button onClick={() => copyHelper('iframe')}>Copy iframe snippet</button>
+            <button onClick={() => copyHelper('markdown')}>Copy markdown ![]()</button>
+          </div>
+        </div>
+      )}
     </PanelFrame>
   );
 });
@@ -329,7 +456,7 @@ function App() {
 
       <main className="workspace-shell" ref={shellRef} style={shellStyle}>
         <div className="left-column">
-          <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+          <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} editorValue={editorValue} />
         </div>
         <div className="divider" onMouseDown={onDividerStart('left')} />
 
@@ -356,7 +483,7 @@ function App() {
             <ConsolePanel panelLayout={layout.panels.console} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
           )}
           {floatingPanels.includes('files') && (
-            <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
+            <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} editorValue={editorValue} />
           )}
           {floatingPanels.includes('tasks') && (
             <TasksPanel panelLayout={layout.panels.tasks} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
