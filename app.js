@@ -12,9 +12,8 @@ import {
   EVENTS
 } from './core/appStateMachine.js';
 import {
-  clearAgentState,
-  loadAgentState,
-  persistAgentState
+  loadAgentsState,
+  migrateLegacyAgentState
 } from './core/persistence.js';
 
 if (!window.GOOGLE_CLIENT_ID) {
@@ -45,7 +44,8 @@ function resolveApiBase() {
 const API_BASE = resolveApiBase();
 const appMachine = new AppStateMachine();
 const MAX_RESUME_AGE = 1000 * 60 * 10;
-let resumeMessageId = null;
+const resumeMessageIds = new Map();
+const activeAgentAbortControllers = new Map();
 
 async function safeFetchJSON(url, options = {}, fallback = null) {
   try {
@@ -655,14 +655,10 @@ function initComposerControls() {
         return;
       }
 
-      if (appMachine.getAgentRoot() !== AGENT_ROOT_STATES.IDLE) {
-        appMachine.dispatch(EVENTS.AGENT_RESET);
-      }
-
       try {
         await startAgentExecution();
       } catch (error) {
-        appMachine.dispatch(EVENTS.AGENT_FAIL);
+        console.warn('Agent execution failed.', error);
       }
     });
   }
@@ -670,8 +666,10 @@ function initComposerControls() {
   if (stopBtn && stopBtn.dataset.composerBound !== 'true') {
     stopBtn.dataset.composerBound = 'true';
     stopBtn.addEventListener('click', () => {
-      cancelAgent();
-      appMachine.dispatch(EVENTS.AGENT_CANCEL);
+      const activeAgent = appMachine.getActiveAgent();
+      if (activeAgent?.agentId) {
+        cancelAgent(activeAgent.agentId);
+      }
     });
   }
 
@@ -692,28 +690,41 @@ async function prepareAgent() {
 }
 
 async function startAgentExecution() {
-  appMachine.dispatch(EVENTS.AGENT_START);
+  const agentId = crypto.randomUUID();
+  appMachine.dispatch({ type: EVENTS.AGENT_START, agentId });
+  appMachine.setActiveAgent(agentId);
   await prepareAgent();
-  appMachine.dispatch(EVENTS.AGENT_READY);
+  appMachine.dispatch({ type: EVENTS.AGENT_READY, agentId });
 
   const { taskId, resumeToken, stream } = await startAgentTask();
-  appMachine.state.agent.taskId = taskId;
-  appMachine.state.agent.resumeToken = resumeToken;
-  appMachine.state.agent.startedAt = Date.now();
-  appMachine.state.agent.partialOutput = '';
-  persistAgentState(appMachine.state.agent);
-
-  appMachine.dispatch(EVENTS.AGENT_STREAM);
-  appMachine.dispatch(EVENTS.STREAM_CHUNK);
-
-  for await (const chunk of stream) {
-    appMachine.state.agent.partialOutput += chunk;
-    persistAgentState(appMachine.state.agent);
-    renderChunk(chunk);
+  const agent = appMachine.getAgent(agentId);
+  if (!agent) {
+    return;
   }
 
-  appMachine.dispatch(EVENTS.STREAM_DONE);
-  appMachine.dispatch(EVENTS.AGENT_COMPLETE);
+  agent.taskId = taskId;
+  agent.resumeToken = resumeToken;
+  agent.startedAt = Date.now();
+  agent.partialOutput = '';
+  appMachine.notify();
+
+  appMachine.dispatch({ type: EVENTS.AGENT_STREAM, agentId });
+  appMachine.dispatch({ type: EVENTS.STREAM_TOKEN, agentId });
+
+  try {
+    for await (const chunk of stream) {
+      agent.partialOutput += chunk;
+      agent.lastEventAt = Date.now();
+      appMachine.dispatch({ type: EVENTS.STREAM_CHUNK, agentId });
+      renderChunkForAgent(agentId, chunk);
+      appMachine.dispatch({ type: EVENTS.STREAM_RENDER, agentId });
+    }
+
+    appMachine.dispatch({ type: EVENTS.STREAM_DONE, agentId });
+    appMachine.dispatch({ type: EVENTS.AGENT_COMPLETE, agentId });
+  } catch (error) {
+    appMachine.dispatch({ type: EVENTS.AGENT_FAIL, agentId, payload: { error: String(error) } });
+  }
 }
 
 async function startAgentTask() {
@@ -753,21 +764,47 @@ async function startAgentTask() {
   return { taskId, resumeToken, stream: streamChunks() };
 }
 
-function cancelAgent() {
-  abortActiveChat({ silent: true });
+async function cancelAgent(agentId) {
+  const agent = appMachine.getAgent(agentId);
+  if (!agent) {
+    return;
+  }
+
+  const activeAbort = activeAgentAbortControllers.get(agentId);
+  if (activeAbort) {
+    activeAbort.abort();
+    activeAgentAbortControllers.delete(agentId);
+  }
+
+  try {
+    if (agent.taskId) {
+      await fetchOptionalApi('/api/agent/cancel', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: agent.taskId })
+      });
+    }
+  } catch {
+    // Ignore cancel failures.
+  }
+
+  appMachine.dispatch({ type: EVENTS.AGENT_CANCEL, agentId });
 }
 
-function renderChunk(chunk) {
+function renderChunkForAgent(agentId, chunk) {
   if (!chunk) {
     return;
   }
 
-  if (!resumeMessageId) {
-    resumeMessageId = addMessage('assistant', '<em>Resuming agent stream…</em>', { pending: true });
+  if (!resumeMessageIds.has(agentId)) {
+    const msgId = addMessage('assistant', `<em>Agent ${agentId.slice(0, 8)} streaming…</em>`, { pending: true });
+    resumeMessageIds.set(agentId, msgId);
   }
 
-  const content = appMachine.state.agent.partialOutput || chunk;
-  renderAssistantMessage(resumeMessageId, content);
+  const messageId = resumeMessageIds.get(agentId);
+  const content = appMachine.getAgent(agentId)?.partialOutput || chunk;
+  renderAssistantMessage(messageId, content);
 }
 
 async function* streamTextChunks(response) {
@@ -793,9 +830,10 @@ async function* streamTextChunks(response) {
   }
 }
 
-async function resumeAgentStream(resumeToken) {
+async function resumeAgentStream(resumeToken, signal) {
   const response = await fetch(`${API_BASE}/api/agent/resume`, {
     method: 'POST',
+    signal,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ resumeToken })
@@ -823,31 +861,60 @@ async function resumeAgentStream(resumeToken) {
   return fallbackChunks();
 }
 
-async function attemptResume(agentState) {
-  if (!agentState?.resumeToken) {
-    console.warn('No resume token. Resetting agent.');
-    appMachine.dispatch(EVENTS.AGENT_RESET);
+const MAX_CONCURRENT_RESUMES = 2;
+
+async function runWithConcurrencyLimit(items, limit, runner) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (queue.length) {
+      const next = queue.shift();
+      if (!next) {
+        break;
+      }
+      await runner(next);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function resumeOneAgent(agent) {
+  if (Date.now() - (agent.startedAt || 0) > MAX_RESUME_AGE) {
+    appMachine.dispatch({ type: EVENTS.AGENT_FAIL, agentId: agent.agentId, payload: { error: 'Resume expired' } });
     return;
   }
 
-  try {
-    const stream = await resumeAgentStream(agentState.resumeToken);
+  const controller = new AbortController();
+  activeAgentAbortControllers.set(agent.agentId, controller);
 
-    appMachine.dispatch(EVENTS.AGENT_STREAM);
-    appMachine.dispatch(EVENTS.STREAM_CHUNK);
+  try {
+    appMachine.dispatch({ type: EVENTS.AGENT_STREAM, agentId: agent.agentId });
+    appMachine.dispatch({ type: EVENTS.STREAM_TOKEN, agentId: agent.agentId });
+
+    const stream = await resumeAgentStream(agent.resumeToken, controller.signal);
 
     for await (const chunk of stream) {
-      appMachine.state.agent.partialOutput += chunk;
-      persistAgentState(appMachine.state.agent);
-      renderChunk(chunk);
+      agent.partialOutput += chunk;
+      agent.lastEventAt = Date.now();
+      appMachine.dispatch({ type: EVENTS.STREAM_CHUNK, agentId: agent.agentId });
+      renderChunkForAgent(agent.agentId, chunk);
+      appMachine.dispatch({ type: EVENTS.STREAM_RENDER, agentId: agent.agentId });
     }
 
-    appMachine.dispatch(EVENTS.STREAM_DONE);
-    appMachine.dispatch(EVENTS.AGENT_COMPLETE);
+    appMachine.dispatch({ type: EVENTS.STREAM_DONE, agentId: agent.agentId });
+    appMachine.dispatch({ type: EVENTS.AGENT_COMPLETE, agentId: agent.agentId });
   } catch (e) {
-    console.warn('Resume failed. Resetting.');
-    appMachine.dispatch(EVENTS.AGENT_FAIL);
+    appMachine.dispatch({ type: EVENTS.AGENT_FAIL, agentId: agent.agentId, payload: { error: String(e) } });
+  } finally {
+    activeAgentAbortControllers.delete(agent.agentId);
   }
+}
+
+async function resumeAllAgents() {
+  const agents = appMachine.getAllAgents().filter((agent) => (
+    agent.root === AGENT_ROOT_STATES.ACTIVE && agent.resumeToken
+  ));
+
+  await runWithConcurrencyLimit(agents, MAX_CONCURRENT_RESUMES, resumeOneAgent);
 }
 
 function setEditorValue(value = '') {
@@ -3376,13 +3443,54 @@ function showErrorState() {
   setStatus('Agent failed');
 }
 
-function handleAgentState(agentState) {
-  const runBtn = document.getElementById('playable-controller-btn');
-  const stopBtn = document.getElementById('stop-agent-btn');
-
-  if (!runBtn || !stopBtn) {
+function renderAgents() {
+  const listEl = document.getElementById('agent-list');
+  if (!listEl) {
     return;
   }
+
+  const activeAgentId = appMachine.state.agents.activeAgentId;
+  const rows = appMachine.getAllAgents().map((agent) => {
+    const isActive = activeAgentId === agent.agentId;
+    return `<button type="button" class="agent-item ${isActive ? 'active' : ''}" data-agent-id="${agent.agentId}">${agent.agentId.slice(0, 8)} · ${agent.root}${agent.streamPhase ? `/${agent.streamPhase}` : ''}</button>`;
+  });
+
+  listEl.innerHTML = rows.join('') || '<div class="agent-empty">No agents yet.</div>';
+  listEl.querySelectorAll('[data-agent-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const agentId = button.getAttribute('data-agent-id');
+      if (agentId) {
+        appMachine.setActiveAgent(agentId);
+      }
+    });
+  });
+}
+
+function renderActiveAgent() {
+  const outputEl = document.getElementById('active-agent-output');
+  const labelEl = document.getElementById('active-agent-label');
+  const agent = appMachine.getActiveAgent();
+  if (!outputEl || !labelEl) {
+    return;
+  }
+
+  if (!agent) {
+    labelEl.textContent = 'No active agent selected';
+    outputEl.textContent = '';
+    return;
+  }
+
+  labelEl.textContent = `${agent.agentId.slice(0, 8)} · ${agent.root}${agent.streamPhase ? `/${agent.streamPhase}` : ''}`;
+  outputEl.textContent = agent.partialOutput || '';
+}
+
+function handleAgentState(agentState) {
+  if (!agentState) {
+    return;
+  }
+
+  const runBtn = document.getElementById('playable-controller-btn');
+  const stopBtn = document.getElementById('stop-agent-btn');
 
   const { root, active, streamPhase } = agentState;
 
@@ -3392,65 +3500,45 @@ function handleAgentState(agentState) {
 
   if (root === AGENT_ROOT_STATES.COMPLETED) {
     showSuccessState();
+    resumeMessageIds.delete(agentState.agentId);
   }
 
   if (root === AGENT_ROOT_STATES.FAILED) {
     showErrorState();
+    resumeMessageIds.delete(agentState.agentId);
   }
 
-  switch (root) {
-    case AGENT_ROOT_STATES.IDLE:
-      resumeMessageId = null;
-      runBtn.disabled = false;
-      stopBtn.disabled = true;
-      break;
-
-    case AGENT_ROOT_STATES.PREPARING:
-    case AGENT_ROOT_STATES.ACTIVE:
-      runBtn.disabled = true;
-      stopBtn.disabled = false;
-      break;
-
-    case AGENT_ROOT_STATES.COMPLETED:
-    case AGENT_ROOT_STATES.FAILED:
-    case AGENT_ROOT_STATES.CANCELLED:
-      resumeMessageId = null;
-      runBtn.disabled = false;
-      stopBtn.disabled = true;
-      break;
-
-    default:
-      break;
+  if (runBtn && stopBtn) {
+    const busy = [AGENT_ROOT_STATES.PREPARING, AGENT_ROOT_STATES.ACTIVE].includes(root);
+    stopBtn.disabled = !busy;
   }
 }
 
 appMachine.subscribe((state) => {
   handleAppState(state.app);
-  handleAgentState(state.agent);
-
+  handleAgentState(appMachine.getActiveAgent());
+  renderAgents();
+  renderActiveAgent();
   updatePlayableButtonState();
 });
 
 if (location.hostname === 'localhost') {
   appMachine.subscribe((state) => {
-    console.log('App state:', state.app, 'Agent state:', state.agent);
+    console.log('App state:', state.app, 'Agents:', state.agents);
   });
 }
 
 async function bootApp() {
-  const persistedAgent = loadAgentState();
-  if (persistedAgent?.root === AGENT_ROOT_STATES.ACTIVE) {
-    if (!persistedAgent.startedAt || Date.now() - persistedAgent.startedAt > MAX_RESUME_AGE) {
-      clearAgentState();
-      appMachine.dispatch(EVENTS.AGENT_RESET);
-    } else {
-      appMachine.state.agent = {
-        ...appMachine.state.agent,
-        ...persistedAgent
-      };
-      attemptResume(persistedAgent);
+  migrateLegacyAgentState();
+  const persistedAgents = loadAgentsState();
+  if (persistedAgents?.byId) {
+    appMachine.state.agents = persistedAgents;
+    if (!appMachine.state.agents.activeAgentId) {
+      appMachine.state.agents.activeAgentId = Object.keys(persistedAgents.byId)[0] || null;
     }
   }
+
+  await resumeAllAgents();
 
   appMachine.dispatch(EVENTS.START);
 
@@ -9534,14 +9622,14 @@ function updatePlayableButtonState() {
   featureState.creditsRemaining = Number.isFinite(remainingCredits) ? remainingCredits : 0;
 
   const appState = appMachine.getAppState();
-  const agentRoot = appMachine.getAgentRoot();
+  const activeAgent = appMachine.getActiveAgent();
   const appReady = appState === APP_STATES.READY;
-  const agentBusy = [AGENT_ROOT_STATES.PREPARING, AGENT_ROOT_STATES.ACTIVE].includes(agentRoot);
+  const activeAgentBusy = [AGENT_ROOT_STATES.PREPARING, AGENT_ROOT_STATES.ACTIVE].includes(activeAgent?.root);
 
-  runBtn.disabled = !appReady || featureState.creditsRemaining <= 0 || agentBusy;
+  runBtn.disabled = !appReady || featureState.creditsRemaining <= 0;
 
   if (stopBtn) {
-    stopBtn.disabled = !agentBusy;
+    stopBtn.disabled = !activeAgentBusy;
   }
 }
 
@@ -9736,9 +9824,12 @@ async function sendChat({ playableMode = false, retryMode = false, userPrompt = 
     }
     rawReply = content;
     if (playableMode) {
-      appMachine.state.agent.partialOutput = rawReply;
-      persistAgentState(appMachine.state.agent);
-      appMachine.dispatch(EVENTS.STREAM_CHUNK);
+      const activeAgent = appMachine.getActiveAgent();
+      if (activeAgent) {
+        activeAgent.partialOutput = rawReply;
+        activeAgent.lastEventAt = Date.now();
+        appMachine.dispatch({ type: EVENTS.STREAM_CHUNK, agentId: activeAgent.agentId });
+      }
     }
     if (sessionState && typeof data?.context_summary === 'string' && data.context_summary.trim()) {
       sessionState.history_summary = {
@@ -9828,7 +9919,7 @@ async function sendChat({ playableMode = false, retryMode = false, userPrompt = 
   }
   if (!hasCode) {
     if (playableMode) {
-      appMachine.dispatch(EVENTS.STREAM_RENDER);
+      { const activeAgent = appMachine.getActiveAgent(); if (activeAgent) appMachine.dispatch({ type: EVENTS.STREAM_RENDER, agentId: activeAgent.agentId }); }
     }
     finalizeChatOnce(() => {
       renderAssistantMessage(pendingMessageId, extractedText, metadataParts);
@@ -9839,7 +9930,10 @@ async function sendChat({ playableMode = false, retryMode = false, userPrompt = 
   }
 
   if (playableMode) {
-    appMachine.dispatch(EVENTS.STREAM_RENDER);
+    const activeAgent = appMachine.getActiveAgent();
+    if (activeAgent) {
+      appMachine.dispatch({ type: EVENTS.STREAM_RENDER, agentId: activeAgent.agentId });
+    }
   }
 
   finalizeChatOnce(() => {

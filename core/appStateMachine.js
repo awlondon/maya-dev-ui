@@ -1,4 +1,4 @@
-import { clearAgentState, persistAgentState } from './persistence.js';
+import { persistAgentsState } from './persistence.js';
 
 export const APP_STATES = {
   BOOTING: 'BOOTING',
@@ -54,25 +54,27 @@ export const EVENTS = {
   AGENT_RESET: 'AGENT_RESET'
 };
 
+export function createAgentState(agentId) {
+  return {
+    agentId,
+    root: AGENT_ROOT_STATES.IDLE,
+    active: null,
+    streamPhase: null,
+    taskId: null,
+    startedAt: null,
+    resumeToken: null,
+    partialOutput: '',
+    lastEventAt: null,
+    error: null
+  };
+}
+
 const appTransitions = {
-  BOOTING: {
-    START: 'INIT_NETWORK'
-  },
-  INIT_NETWORK: {
-    NETWORK_OK: 'INIT_SESSION',
-    NETWORK_FAIL: 'DEGRADED'
-  },
-  INIT_SESSION: {
-    SESSION_OK: 'INIT_USAGE',
-    SESSION_FAIL: 'DEGRADED'
-  },
-  INIT_USAGE: {
-    USAGE_OK: 'READY',
-    USAGE_FAIL: 'DEGRADED'
-  },
-  DEGRADED: {
-    START: 'INIT_NETWORK'
-  },
+  BOOTING: { START: 'INIT_NETWORK' },
+  INIT_NETWORK: { NETWORK_OK: 'INIT_SESSION', NETWORK_FAIL: 'DEGRADED' },
+  INIT_SESSION: { SESSION_OK: 'INIT_USAGE', SESSION_FAIL: 'DEGRADED' },
+  INIT_USAGE: { USAGE_OK: 'READY', USAGE_FAIL: 'DEGRADED' },
+  DEGRADED: { START: 'INIT_NETWORK' },
   READY: {},
   OFFLINE: {},
   ERROR: {}
@@ -80,24 +82,15 @@ const appTransitions = {
 
 const agentRootTransitions = {
   IDLE: { AGENT_START: 'PREPARING' },
-  PREPARING: {
-    AGENT_READY: 'ACTIVE',
-    AGENT_FAIL: 'FAILED'
-  },
-  ACTIVE: {
-    AGENT_COMPLETE: 'COMPLETED',
-    AGENT_FAIL: 'FAILED',
-    AGENT_CANCEL: 'CANCELLED'
-  },
+  PREPARING: { AGENT_READY: 'ACTIVE', AGENT_FAIL: 'FAILED', AGENT_CANCEL: 'CANCELLED' },
+  ACTIVE: { AGENT_COMPLETE: 'COMPLETED', AGENT_FAIL: 'FAILED', AGENT_CANCEL: 'CANCELLED' },
   COMPLETED: { AGENT_RESET: 'IDLE' },
   FAILED: { AGENT_RESET: 'IDLE' },
   CANCELLED: { AGENT_RESET: 'IDLE' }
 };
 
 const agentActiveTransitions = {
-  RUNNING: {
-    AGENT_STREAM: AGENT_ACTIVE_SUBSTATES.STREAMING
-  },
+  RUNNING: { AGENT_STREAM: AGENT_ACTIVE_SUBSTATES.STREAMING },
   STREAMING: {
     STREAM_TOKEN: AGENT_STREAM_PHASES.TOKENIZING,
     STREAM_CHUNK: AGENT_STREAM_PHASES.RECEIVING,
@@ -110,69 +103,97 @@ export class AppStateMachine {
   constructor() {
     this.state = {
       app: APP_STATES.BOOTING,
-      agent: {
-        root: AGENT_ROOT_STATES.IDLE,
-        active: null,
-        streamPhase: null,
-        taskId: null,
-        startedAt: null,
-        resumeToken: null,
-        partialOutput: ''
-      }
+      agents: { byId: {}, activeAgentId: null }
     };
     this.listeners = [];
   }
 
-  dispatch(event) {
-    let changed = false;
+  getOrCreateAgent(agentId) {
+    if (!agentId) {
+      return null;
+    }
+    if (!this.state.agents.byId[agentId]) {
+      this.state.agents.byId[agentId] = createAgentState(agentId);
+    }
+    return this.state.agents.byId[agentId];
+  }
 
-    const appNext = appTransitions[this.state.app]?.[event];
+  applyAgentTransitions(agent, evt) {
+    if (!agent || !evt?.type) {
+      return false;
+    }
+
+    let changed = false;
+    const root = agent.root;
+    const rootNext = agentRootTransitions[root]?.[evt.type];
+
+    if (rootNext) {
+      agent.root = rootNext;
+      agent.lastEventAt = Date.now();
+      changed = true;
+
+      if (rootNext === AGENT_ROOT_STATES.ACTIVE) {
+        agent.active = AGENT_ACTIVE_SUBSTATES.RUNNING;
+      }
+
+      if (rootNext !== AGENT_ROOT_STATES.ACTIVE) {
+        agent.active = null;
+        agent.streamPhase = null;
+      }
+
+      if (rootNext === AGENT_ROOT_STATES.IDLE) {
+        agent.taskId = null;
+        agent.startedAt = null;
+        agent.resumeToken = null;
+        agent.partialOutput = '';
+        agent.error = null;
+      }
+
+      if ([AGENT_ROOT_STATES.COMPLETED, AGENT_ROOT_STATES.FAILED, AGENT_ROOT_STATES.CANCELLED].includes(rootNext)) {
+        agent.resumeToken = null;
+        agent.streamPhase = null;
+        agent.active = null;
+      }
+    }
+
+    if (agent.root === AGENT_ROOT_STATES.ACTIVE) {
+      const active = agent.active;
+      const activeNext = agentActiveTransitions[active]?.[evt.type];
+      if (activeNext) {
+        if (active === AGENT_ACTIVE_SUBSTATES.RUNNING && activeNext === AGENT_ACTIVE_SUBSTATES.STREAMING) {
+          agent.active = AGENT_ACTIVE_SUBSTATES.STREAMING;
+        } else {
+          agent.streamPhase = activeNext;
+        }
+        agent.lastEventAt = Date.now();
+        changed = true;
+      }
+    }
+
+    if (evt.type === EVENTS.AGENT_FAIL) {
+      agent.error = evt.payload?.error || 'Unknown error';
+      changed = true;
+    }
+
+    return changed;
+  }
+
+  dispatch(evt) {
+    const event = typeof evt === 'string' ? { type: evt } : evt;
+    if (!event?.type) {
+      return;
+    }
+
+    let changed = false;
+    const appNext = appTransitions[this.state.app]?.[event.type];
     if (appNext) {
       this.state.app = appNext;
       changed = true;
     }
 
-    const root = this.state.agent.root;
-    const rootNext = agentRootTransitions[root]?.[event];
-    if (rootNext) {
-      this.state.agent.root = rootNext;
-
-      if (rootNext !== AGENT_ROOT_STATES.ACTIVE) {
-        this.state.agent.active = null;
-        this.state.agent.streamPhase = null;
-      }
-
-      if (rootNext === AGENT_ROOT_STATES.IDLE) {
-        this.state.agent.taskId = null;
-        this.state.agent.startedAt = null;
-        this.state.agent.resumeToken = null;
-        this.state.agent.partialOutput = '';
-      }
-
-      if ([AGENT_ROOT_STATES.COMPLETED, AGENT_ROOT_STATES.FAILED, AGENT_ROOT_STATES.CANCELLED].includes(rootNext)) {
-        clearAgentState();
-      }
-
-      changed = true;
-    }
-
-    if (root === AGENT_ROOT_STATES.PREPARING && event === EVENTS.AGENT_READY) {
-      this.state.agent.active = AGENT_ACTIVE_SUBSTATES.RUNNING;
-      changed = true;
-    }
-
-    if (this.state.agent.root === AGENT_ROOT_STATES.ACTIVE) {
-      const active = this.state.agent.active;
-      const activeNext = agentActiveTransitions[active]?.[event];
-
-      if (activeNext) {
-        if (active === AGENT_ACTIVE_SUBSTATES.RUNNING && activeNext === AGENT_ACTIVE_SUBSTATES.STREAMING) {
-          this.state.agent.active = AGENT_ACTIVE_SUBSTATES.STREAMING;
-        } else {
-          this.state.agent.streamPhase = activeNext;
-        }
-        changed = true;
-      }
+    if (event.agentId) {
+      const agent = this.getOrCreateAgent(event.agentId);
+      changed = this.applyAgentTransitions(agent, event) || changed;
     }
 
     if (changed) {
@@ -185,34 +206,25 @@ export class AppStateMachine {
   }
 
   notify() {
-    persistAgentState(this.state.agent);
-
+    persistAgentsState(this.state.agents);
     for (const fn of this.listeners) {
       fn(this.state);
     }
   }
 
-  getState() {
-    return this.state;
+  getState() { return this.state; }
+  getAppState() { return this.state.app; }
+  getAgent(agentId) { return this.state.agents.byId[agentId] || null; }
+  getAllAgents() { return Object.values(this.state.agents.byId); }
+  setActiveAgent(agentId) {
+    this.state.agents.activeAgentId = agentId;
+    this.notify();
   }
+  getActiveAgent() { return this.getAgent(this.state.agents.activeAgentId); }
 
-  getAppState() {
-    return this.state.app;
-  }
-
-  getAgentState() {
-    return this.state.agent;
-  }
-
-  getAgentRoot() {
-    return this.state.agent.root;
-  }
-
-  getAgentActive() {
-    return this.state.agent.active;
-  }
-
-  getAgentStreamPhase() {
-    return this.state.agent.streamPhase;
-  }
+  // Backward-compatible accessors now resolve against active agent.
+  getAgentState() { return this.getActiveAgent(); }
+  getAgentRoot() { return this.getActiveAgent()?.root || AGENT_ROOT_STATES.IDLE; }
+  getAgentActive() { return this.getActiveAgent()?.active || null; }
+  getAgentStreamPhase() { return this.getActiveAgent()?.streamPhase || null; }
 }
