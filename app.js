@@ -30,6 +30,55 @@ function resolveApiBase() {
 }
 
 const API_BASE = resolveApiBase();
+let hasDegradedApi = false;
+
+async function safeFetchJSON(url, options = {}, fallback = null) {
+  try {
+    const res = await fetch(`${API_BASE}${url}`, options);
+    if (!res.ok) {
+      hasDegradedApi = true;
+      console.warn(`API error ${res.status} for ${url}`);
+      return fallback;
+    }
+    return await res.json();
+  } catch (err) {
+    hasDegradedApi = true;
+    console.warn(`Network error for ${url}`, err);
+    return fallback;
+  }
+}
+
+function safeStorageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    console.warn('Storage unavailable. Running stateless.');
+  }
+}
+
+function safeStorageRemove(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    console.warn('Storage unavailable. Running stateless.');
+  }
+}
+
+function safeStorageClear(storage) {
+  try {
+    storage?.clear();
+  } catch {
+    console.warn('Storage unavailable. Running stateless.');
+  }
+}
 
 const unsupportedApiEndpoints = new Set();
 
@@ -47,7 +96,8 @@ async function fetchOptionalApi(path, options = {}) {
     }
     return response;
   } catch (error) {
-    return Promise.reject(error);
+    console.warn(`Network error for ${path}`, error);
+    return null;
   }
 }
 
@@ -434,8 +484,17 @@ const UI_STATE = {
   APP: 'app'
 };
 let uiState = UI_STATE.AUTH;
+const DEFAULT_FEATURE_STATE = {
+  playableModeEnabled: false,
+  canRunCode: true,
+  canChat: true,
+  creditsRemaining: 0,
+  authenticated: false
+};
+let featureState = { ...DEFAULT_FEATURE_STATE };
 let showAnalytics = false;
 let appInitialized = false;
+let appReady = false;
 const Auth = {
   user: null,
   token: null,
@@ -806,7 +865,11 @@ const SESSION_BRIDGE_SCRIPT = `${SESSION_BRIDGE_MARKER}
   });
   const notifyError = (payload) => {
     if (window.parent) {
-      window.parent.postMessage({ type: 'SANDBOX_ERROR', error: payload }, '*');
+      try {
+        window.parent.postMessage({ type: 'SANDBOX_ERROR', error: payload }, '*');
+      } catch (err) {
+        console.warn('postMessage blocked by COOP');
+      }
     }
   };
   window.addEventListener('error', (event) => {
@@ -1027,24 +1090,19 @@ function updateCreditsUI(remaining, total) {
     root.dataset.remainingCredits = `${resolvedRemaining}`;
     root.dataset.creditsTotal = `${resolvedTotal}`;
   }
-  if (window.localStorage) {
-    window.localStorage.setItem('maya_credits_remaining', `${resolvedRemaining}`);
-    window.localStorage.setItem('maya_credits_total', `${resolvedTotal}`);
-  }
+  safeStorageSet('maya_credits_remaining', `${resolvedRemaining}`);
+  safeStorageSet('maya_credits_total', `${resolvedTotal}`);
   updateCreditUI();
   renderCredits();
   updateAccountPlan();
 }
 
 function hydrateCreditState() {
-  if (!window.localStorage) {
-    return;
-  }
   const storedRemaining = Number(
-    window.localStorage.getItem('maya_credits_remaining')
-    ?? window.localStorage.getItem('maya_credits')
+    safeStorageGet('maya_credits_remaining')
+    ?? safeStorageGet('maya_credits')
   );
-  const storedTotal = Number(window.localStorage.getItem('maya_credits_total'));
+  const storedTotal = Number(safeStorageGet('maya_credits_total'));
   if (Number.isFinite(storedRemaining)) {
     updateCreditsUI(storedRemaining, Number.isFinite(storedTotal) ? storedTotal : storedRemaining);
   }
@@ -1055,8 +1113,8 @@ function resolveCredits(credits) {
     return credits;
   }
   const storedCredits = Number(
-    window.localStorage?.getItem('maya_credits_remaining')
-    ?? window.localStorage?.getItem('maya_credits')
+    safeStorageGet('maya_credits_remaining')
+    ?? safeStorageGet('maya_credits')
   );
   if (Number.isFinite(storedCredits)) {
     return storedCredits;
@@ -1065,14 +1123,11 @@ function resolveCredits(credits) {
 }
 
 function persistSessionStorage({ user, token }) {
-  if (!window.localStorage) {
-    return;
-  }
   if (user) {
-    window.localStorage.setItem('maya_user', JSON.stringify(user));
+    safeStorageSet('maya_user', JSON.stringify(user));
   }
   if (token) {
-    window.localStorage.setItem('maya_token', token);
+    safeStorageSet('maya_token', token);
   }
 }
 
@@ -1092,7 +1147,11 @@ function postSessionToSandbox(frame = sandboxFrame) {
   if (!payload || !frame?.contentWindow) {
     return;
   }
-  frame.contentWindow.postMessage(payload, '*');
+  try {
+    frame.contentWindow.postMessage(payload, '*');
+  } catch (err) {
+    console.warn('postMessage blocked by COOP');
+  }
 }
 
 function syncSessionToSandbox() {
@@ -1134,7 +1193,7 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
     Number.isFinite(resolvedTotal) ? resolvedTotal : resolvedRemaining
   );
   const planLabel = user?.plan || user?.plan_tier || user?.planTier || 'Free';
-  const storedToken = window.localStorage?.getItem('maya_token');
+  const storedToken = safeStorageGet('maya_token');
   const resolvedToken = token
     || storedToken
     || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `token-${Date.now()}`);
@@ -1150,14 +1209,12 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
   };
   accountState.user = user;
 
-  if (window.localStorage) {
-    window.localStorage.setItem('maya_credits_remaining', `${clampedRemaining}`);
-    window.localStorage.setItem(
-      'maya_credits_total',
-      `${Number.isFinite(resolvedTotal) ? resolvedTotal : clampedRemaining}`
-    );
-    window.localStorage.setItem('maya_credits', `${clampedRemaining}`);
-  }
+  safeStorageSet('maya_credits_remaining', `${clampedRemaining}`);
+  safeStorageSet(
+    'maya_credits_total',
+    `${Number.isFinite(resolvedTotal) ? resolvedTotal : clampedRemaining}`
+  );
+  safeStorageSet('maya_credits', `${clampedRemaining}`);
 
   document.body.classList.remove('unauthenticated');
   applyAuthToRoot();
@@ -1207,7 +1264,7 @@ async function handleGoogleCredential(response) {
   const user = meData?.user;
   Auth.user = user ?? null;
   Auth.token = Auth.token
-    || window.localStorage?.getItem('maya_token')
+    || safeStorageGet('maya_token')
     || (window.crypto?.randomUUID ? window.crypto.randomUUID() : `token-${Date.now()}`);
   Auth.provider = user?.provider ?? 'google';
   applyAuthToRoot();
@@ -2507,7 +2564,7 @@ function getSelectedContextMode() {
   return resolveContextMode(
     chatContextMode?.value
     || Auth.user?.preferences?.context_mode
-    || window.localStorage?.getItem(CONTEXT_MODE_STORAGE_KEY)
+    || safeStorageGet(CONTEXT_MODE_STORAGE_KEY)
     || 'balanced'
   );
 }
@@ -2520,9 +2577,7 @@ function applyContextModeSelection(mode) {
   if (accountContextMode) {
     accountContextMode.value = resolvedMode;
   }
-  if (window.localStorage) {
-    window.localStorage.setItem(CONTEXT_MODE_STORAGE_KEY, resolvedMode);
-  }
+  safeStorageSet(CONTEXT_MODE_STORAGE_KEY, resolvedMode);
 }
 
 function updateAccountPreferences() {
@@ -2829,7 +2884,7 @@ async function signOut() {
   Auth.provider = null;
   clearAuthFromRoot();
 
-  AUTH_STORAGE_KEYS.forEach((key) => window.localStorage?.removeItem(key));
+  AUTH_STORAGE_KEYS.forEach((key) => safeStorageRemove(key));
   window.sessionStorage?.clear();
 
   ModalManager.close();
@@ -3040,31 +3095,102 @@ async function checkEmailVerification() {
   }
 }
 
-async function bootstrapApp() {
-  await checkEmailVerification();
-  const sessionData = await hydrateSessionFromServer();
-  if (sessionData?.user) {
+async function loadPlans() {
+  const plans = await safeFetchJSON('/api/plans', { credentials: 'include' }, { plans: [] });
+  if (Array.isArray(plans?.plans)) {
+    planCatalog = plans.plans.map((plan) => ({
+      ...plan,
+      tier: plan.tier?.toString().toLowerCase()
+    }));
+  }
+  const resolvedPlans = getAvailablePlans();
+  renderPricingPlans(resolvedPlans);
+  renderPaywallPlans(resolvedPlans);
+  const initialSelectedPlan = getStoredPaywallPlan() || getDefaultPaidPlanTier();
+  updatePaywallPlanSelection(initialSelectedPlan);
+  updatePaywallCtas(paywallModal?.dataset.mode || 'firm', initialSelectedPlan);
+}
+
+async function loadSession() {
+  const session = await safeFetchJSON('/api/session/state', { credentials: 'include' }, {
+    authenticated: false,
+    user: null
+  });
+
+  if (!session) {
+    console.warn('Session unavailable. Continuing in anonymous mode.');
+  }
+
+  featureState.authenticated = !!session?.authenticated;
+  if (session?.user) {
     onAuthSuccess({
-      user: sessionData.user,
-      token: sessionData.token,
-      provider: sessionData.user?.provider || sessionData.provider,
-      credits: sessionData.credits,
+      user: session.user,
+      token: session.token,
+      provider: session.user?.provider || session.provider,
+      credits: session.credits,
       deferRender: true
     });
   }
+  return session;
+}
+
+async function loadUsage() {
+  const usage = await safeFetchJSON('/api/usage/overview', { credentials: 'include' }, {
+    creditsRemaining: 0,
+    usage: []
+  });
+  featureState.creditsRemaining = usage?.creditsRemaining ?? 0;
+  featureState.playableModeEnabled = true;
+  return usage;
+}
+
+function showOfflineBanner() {
+  if (document.querySelector('.degraded-banner')) {
+    return;
+  }
+  const banner = document.createElement('div');
+  banner.textContent = 'Limited mode: backend unavailable.';
+  banner.className = 'degraded-banner';
+  document.body.prepend(banner);
+}
+
+function finalizeUI() {
+  updatePlayableButtonState();
+  if (hasDegradedApi) {
+    showOfflineBanner();
+  }
+  console.log('UI initialized in safe mode.');
+}
+
+async function initializeApp() {
+  try {
+    await loadPlans();
+    await loadSession();
+    await loadUsage();
+  } catch (e) {
+    console.warn('Initialization degraded:', e);
+  } finally {
+    appReady = true;
+    finalizeUI();
+  }
+}
+
+async function bootstrapApp() {
+  await checkEmailVerification();
   hydrateCreditState();
-  await hydratePlanCatalog();
+  await initializeApp();
   applyAuthToRoot();
   const user = getAuthenticatedUser();
   if (!user) {
+    console.warn('Session unavailable. Continuing in anonymous mode.');
     uiState = UI_STATE.AUTH;
     showAnalytics = false;
     resetAppToUnauthed();
-    return;
+  } else {
+    uiState = UI_STATE.APP;
+    showAnalytics = false;
+    renderApp();
   }
-  uiState = UI_STATE.APP;
-  showAnalytics = false;
-  renderApp();
   updateRouteView();
 }
 
@@ -5098,7 +5224,7 @@ function getDailyUsagePercent(used, limit) {
 }
 
 function loadNudgeState(userId) {
-  if (!userId || !window.localStorage) {
+  if (!userId) {
     return {
       user_id: userId || null,
       last_nudge_type: null,
@@ -5109,7 +5235,7 @@ function loadNudgeState(userId) {
     };
   }
   try {
-    const stored = JSON.parse(window.localStorage.getItem(NUDGE_STATE_KEY) || '{}');
+    const stored = JSON.parse(safeStorageGet(NUDGE_STATE_KEY) || '{}');
     if (stored.user_id !== userId) {
       return {
         user_id: userId,
@@ -5141,10 +5267,10 @@ function loadNudgeState(userId) {
 }
 
 function saveNudgeState(state) {
-  if (!state || !window.localStorage) {
+  if (!state) {
     return;
   }
-  window.localStorage.setItem(NUDGE_STATE_KEY, JSON.stringify(state));
+  safeStorageSet(NUDGE_STATE_KEY, JSON.stringify(state));
 }
 
 function pruneTimestamps(entries, windowMs) {
@@ -5289,15 +5415,12 @@ const isFirstSession = (() => {
 })();
 
 function ensurePaywallFirstSeen() {
-  if (!window.localStorage) {
-    return null;
-  }
-  const existing = localStorage.getItem(PAYWALL_FIRST_SEEN_KEY);
+  const existing = safeStorageGet(PAYWALL_FIRST_SEEN_KEY);
   if (existing) {
     return Number(existing);
   }
   const now = Date.now();
-  localStorage.setItem(PAYWALL_FIRST_SEEN_KEY, String(now));
+  safeStorageSet(PAYWALL_FIRST_SEEN_KEY, String(now));
   return now;
 }
 
@@ -5310,24 +5433,20 @@ function isWithinFirstDay() {
 }
 
 function hasPaywallUpgradeCompleted() {
-  return window.localStorage?.getItem(PAYWALL_UPGRADE_KEY) === 'true';
+  return safeStorageGet(PAYWALL_UPGRADE_KEY) === 'true';
 }
 
 function markPaywallUpgradeCompleted() {
-  if (window.localStorage) {
-    window.localStorage.setItem(PAYWALL_UPGRADE_KEY, 'true');
-  }
+  safeStorageSet(PAYWALL_UPGRADE_KEY, 'true');
 }
 
 function isPaywallDismissed() {
-  const dismissedAt = Number(window.localStorage?.getItem(PAYWALL_DISMISS_KEY));
+  const dismissedAt = Number(safeStorageGet(PAYWALL_DISMISS_KEY));
   return Number.isFinite(dismissedAt) && Date.now() - dismissedAt < PAYWALL_DISMISS_MS;
 }
 
 function dismissPaywallForPeriod() {
-  if (window.localStorage) {
-    window.localStorage.setItem(PAYWALL_DISMISS_KEY, String(Date.now()));
-  }
+  safeStorageSet(PAYWALL_DISMISS_KEY, String(Date.now()));
 }
 
 function suppressPaywallForSession() {
@@ -5341,13 +5460,11 @@ function isPaywallSuppressedForSession() {
 }
 
 function getStoredPaywallPlan() {
-  return window.localStorage?.getItem(PAYWALL_SELECTED_PLAN_KEY);
+  return safeStorageGet(PAYWALL_SELECTED_PLAN_KEY);
 }
 
 function setStoredPaywallPlan(plan) {
-  if (window.localStorage) {
-    window.localStorage.setItem(PAYWALL_SELECTED_PLAN_KEY, plan);
-  }
+  safeStorageSet(PAYWALL_SELECTED_PLAN_KEY, plan);
 }
 
 function buildFallbackPlanCatalog() {
@@ -9078,35 +9195,31 @@ function updatePlayableButtonState() {
 
   console.debug('Controller button rendered:', playableButton, 'disabled:', playableButton.disabled);
 
-  const prompt = getPromptInput().trim();
-  const codeText = getEditorCode().trim();
-  const hasPromptText = prompt.length >= 1;
-  const hasCodeText = codeText.length >= 1;
-
-  if (!hasPromptText && !hasCodeText) {
-    playableButton.disabled = true;
-    playableButton.title = 'Add a prompt or code to enable game mode';
-    return;
-  }
-
   const creditState = getCreditState();
+  const remainingCredits = Number.isFinite(creditState.remainingCredits)
+    ? creditState.remainingCredits
+    : featureState.creditsRemaining;
+  featureState.creditsRemaining = Number.isFinite(remainingCredits) ? remainingCredits : 0;
+
+  const enabled =
+    featureState.playableModeEnabled
+    && featureState.creditsRemaining > 0
+    && !chatState?.locked
+    && lastThrottleState?.state !== 'blocked';
+
+  playableButton.disabled = !enabled;
   if (chatState?.locked) {
-    playableButton.disabled = true;
     playableButton.title = 'Wait for the current response to finish';
     return;
   }
-  if (creditState.remainingCredits !== null && creditState.remainingCredits <= 0) {
-    playableButton.disabled = true;
-    playableButton.title = 'Credit limit reached';
-    return;
-  }
   if (lastThrottleState?.state === 'blocked') {
-    playableButton.disabled = true;
     playableButton.title = 'Daily credit limit reached';
     return;
   }
-
-  playableButton.disabled = false;
+  if (featureState.creditsRemaining <= 0) {
+    playableButton.title = 'Credit limit reached';
+    return;
+  }
   playableButton.title = 'Make it a game';
 }
 
@@ -10062,7 +10175,7 @@ if (chatContextMode) {
   applyContextModeSelection(getSelectedContextMode());
   chatContextMode.addEventListener('change', async () => {
     const previousMode = resolveContextMode(
-      window.localStorage?.getItem(CONTEXT_MODE_STORAGE_KEY)
+      safeStorageGet(CONTEXT_MODE_STORAGE_KEY)
       || Auth.user?.preferences?.context_mode
       || 'balanced'
     );
