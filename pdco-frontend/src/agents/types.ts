@@ -29,3 +29,25 @@ export type AgentRunResponse = {
     api_calls: number;
   };
 };
+
+export type AgentEvent = {
+  type: 'initial' | 'ci' | 'pr' | 'policy';
+  task_id: string;
+  status?: string;
+  conclusion?: string;
+  merged?: boolean;
+  pr_number?: number;
+  pr_url?: string;
+  diff?: {
+    files: {
+      path: string;
+      before?: string;
+      after?: string;
+    }[];
+  };
+  policy?: {
+    reasons: string[];
+    risk_level: string;
+  };
+  timestamp: number;
+};
