@@ -32,6 +32,7 @@ const wss = new WebSocketServer({ server });
 app.use(express.json({ limit: '1mb' }));
 
 let clients = [];
+const shaTaskMap = new Map();
 
 wss.on('connection', (ws) => {
   clients.push(ws);
@@ -1028,9 +1029,19 @@ app.post('/webhook', async (req, res) => {
 
   if (event === 'check_run') {
     const check = req.body.check_run;
+    const taskId = shaTaskMap.get(check?.head_sha) || null;
+
     broadcast({
       type: 'ci_update',
+      task_id: taskId,
       repo: req.body.repository?.name,
+      sha: check?.head_sha,
+      status: check?.status,
+      conclusion: check?.conclusion || null,
+    });
+    broadcast({
+      type: 'ci',
+      task_id: taskId,
       sha: check?.head_sha,
       status: check?.status,
       conclusion: check?.conclusion || null,
@@ -1039,13 +1050,25 @@ app.post('/webhook', async (req, res) => {
 
   if (event === 'pull_request') {
     const pr = req.body.pull_request;
+    const headSha = pr?.head?.sha;
+    const taskId = shaTaskMap.get(headSha) || null;
+
     broadcast({
       type: 'pr_update',
+      task_id: taskId,
       repo: req.body.repository?.name,
       pr_number: pr?.number,
-      sha: pr?.head?.sha,
+      sha: headSha,
       state: pr?.state,
       merged: Boolean(pr?.merged),
+    });
+    broadcast({
+      type: 'pr',
+      task_id: taskId,
+      pr_number: pr?.number,
+      sha: headSha,
+      merged: Boolean(pr?.merged),
+      state: pr?.state,
     });
   }
 
@@ -1098,6 +1121,13 @@ app.post('/multi-agent-run', async (req, res) => {
         config: policyConfig,
       });
 
+      broadcast({
+        type: 'policy',
+        task_id: task.id,
+        risk_level: policy.risk_level,
+        reasons: policy.reasons || [],
+      });
+
       if (!policy.allow_merge) {
         results.push({
           task_id: task.id,
@@ -1127,6 +1157,16 @@ app.post('/multi-agent-run', async (req, res) => {
       }
 
       const pr = await openPullRequest(repo, patch.branch, 'main', patch.pr.title, patch.pr.body);
+      if (pr?.head?.sha) {
+        shaTaskMap.set(pr.head.sha, task.id);
+      }
+      broadcast({
+        type: 'pr',
+        task_id: task.id,
+        pr_number: pr.number,
+        sha: pr?.head?.sha || null,
+        merged: false,
+      });
 
       let merge = { merged: false, reason: 'auto_merge disabled' };
       if (execution.auto_merge) {
