@@ -522,6 +522,8 @@ const consoleLog = document.getElementById('console-output-log');
 const consolePane = document.getElementById('consoleOutput');
 const root = document.getElementById('root');
 const workspace = document.getElementById('workspace');
+const leftPane = document.getElementById('left-pane');
+const workspaceTabButtons = Array.from(document.querySelectorAll('[data-workspace-panel]'));
 let sandboxFrame = document.getElementById('sandbox');
 const previewFrameHost = document.getElementById('previewFrameContainer');
 const statusLabel = document.getElementById('status-label');
@@ -532,6 +534,13 @@ const splitter = document.getElementById('splitter');
 const rightPane = document.getElementById('right-pane');
 const codePanel = document.getElementById('code-panel');
 const outputPanel = document.getElementById('output-panel');
+const chatPanel = document.getElementById('chat-panel');
+const agentsPanel = document.getElementById('agents-panel');
+const runAgentsButton = document.getElementById('runAgentsBtn');
+const prList = document.getElementById('prList');
+const policyPanel = document.getElementById('policyPanel');
+const budgetPanel = document.getElementById('budgetPanel');
+const executionGraph = document.getElementById('executionGraph');
 const fullscreenToggle = document.getElementById('fullscreenToggle');
 const interfaceStatus = document.getElementById('interfaceStatus');
 const viewDiffBtn = document.getElementById('viewDiffBtn');
@@ -597,6 +606,7 @@ const runtimeState = {
   started_at: null
 };
 let editorApi = null;
+const prTaskMap = {};
 let navigationInProgress = false;
 let revertModalOpen = false;
 const GENERATION_PHASES = [
@@ -12281,6 +12291,233 @@ document.addEventListener('keydown', (event) => {
     closeUpgradeModal();
   }
 });
+
+const WORKSPACE_PANELS = ['chat', 'code', 'console', 'agents'];
+
+function setWorkspacePanel(panel) {
+  const target = WORKSPACE_PANELS.includes(panel) ? panel : 'chat';
+
+  workspaceTabButtons.forEach((button) => {
+    const isActive = button.dataset.workspacePanel === target;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-pressed', String(isActive));
+  });
+
+  if (leftPane) {
+    leftPane.classList.toggle('hidden', target !== 'chat');
+  }
+  if (rightPane) {
+    rightPane.classList.toggle('hidden', target === 'chat');
+  }
+
+  chatPanel?.classList.toggle('hidden', target !== 'chat');
+  codePanel?.classList.toggle('hidden', target !== 'code');
+  outputPanel?.classList.toggle('hidden', target !== 'console');
+  agentsPanel?.classList.toggle('hidden', target !== 'agents');
+
+  if (splitter) {
+    splitter.classList.toggle('hidden', target !== 'code' && target !== 'console');
+  }
+
+  if (target === 'code') {
+    requestAnimationFrame(() => editorApi?.layout?.());
+  }
+}
+
+function updateNodeState(taskId, state) {
+  if (!executionGraph || !taskId) {
+    return;
+  }
+  const node = executionGraph.querySelector(`[data-task-id="${taskId}"]`);
+  if (!node) {
+    return;
+  }
+  const colorMap = {
+    running: '#f5c542',
+    blocked: '#f06565',
+    pr_opened: '#4dabf7',
+    merged: '#51cf66'
+  };
+  node.setAttribute('fill', colorMap[state] || '#2a2a38');
+}
+
+function buildExecutionGraph(taskGraph) {
+  if (!executionGraph || !taskGraph?.tasks?.length) {
+    return;
+  }
+  executionGraph.innerHTML = '';
+  const tasks = taskGraph.tasks;
+  const spacingY = 80;
+
+  tasks.forEach((task, index) => {
+    const x = 40;
+    const y = 20 + index * spacingY;
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', String(x));
+    rect.setAttribute('y', String(y));
+    rect.setAttribute('rx', '6');
+    rect.setAttribute('width', '220');
+    rect.setAttribute('height', '44');
+    rect.setAttribute('fill', '#2a2a38');
+    rect.setAttribute('stroke', '#4c4c68');
+    rect.dataset.taskId = task.id;
+
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', String(x + 12));
+    label.setAttribute('y', String(y + 26));
+    label.setAttribute('fill', '#fff');
+    label.setAttribute('font-size', '12');
+    label.textContent = `${task.id}: ${task.title || 'Untitled task'}`;
+
+    executionGraph.append(rect, label);
+  });
+}
+
+function handleAgentRunResponse(data) {
+  if (prList) {
+    prList.innerHTML = '';
+  }
+
+  (data?.tasks || []).forEach((result) => {
+    if (!result?.pr_number || !prList) {
+      return;
+    }
+    prTaskMap[result.pr_number] = result.task_id;
+    const row = document.createElement('div');
+    row.id = `pr-${result.pr_number}`;
+    row.textContent = `PR #${result.pr_number}: task ${result.task_id}`;
+    prList.appendChild(row);
+  });
+
+  if (policyPanel) {
+    policyPanel.innerHTML = '';
+    (data?.tasks || []).forEach((result) => {
+      if (result.status !== 'blocked_by_policy' || !result.policy?.reasons?.length) {
+        return;
+      }
+      const blockInfo = document.createElement('div');
+      blockInfo.innerHTML = `
+        <div><strong>${result.task_id} blocked</strong></div>
+        <ul>${result.policy.reasons.map((reason) => `<li>${reason}</li>`).join('')}</ul>
+      `;
+      policyPanel.appendChild(blockInfo);
+    });
+  }
+
+  if (budgetPanel) {
+    budgetPanel.innerHTML = data?.budget
+      ? `Tokens: ${data.budget.tokens_used}<br>API calls: ${data.budget.api_calls}`
+      : '';
+  }
+
+  if (data?.task_graph) {
+    buildExecutionGraph(data.task_graph);
+  }
+}
+
+async function runMultiAgent() {
+  const objective = chatInput?.value || getEditorValue?.() || '';
+  if (!objective.trim()) {
+    showToast('Enter some intent before running agents.');
+    return;
+  }
+
+  const payload = {
+    objective,
+    constraints: {
+      risk: 'medium',
+      budget: { max_tokens: 120000, max_api_calls: 80 }
+    },
+    execution: { enable_pages: true }
+  };
+
+  if (prList) {
+    prList.textContent = 'Running…';
+  }
+  if (policyPanel) {
+    policyPanel.innerHTML = '';
+  }
+  if (budgetPanel) {
+    budgetPanel.innerHTML = '';
+  }
+
+  try {
+    const response = await fetch('http://localhost:3000/multi-agent-run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json();
+    handleAgentRunResponse(data);
+  } catch (error) {
+    console.error(error);
+    if (prList) {
+      prList.textContent = 'Error contacting server.';
+    }
+  }
+}
+
+function updatePRStatus(data) {
+  const prEl = document.getElementById(`pr-${data.pr_number}`);
+  if (!prEl) {
+    return;
+  }
+
+  prEl.textContent = `PR #${data.pr_number}: ${data.state}${data.merged ? ' (merged)' : ''}`;
+  const taskId = prTaskMap[data.pr_number];
+  if (data.merged && taskId) {
+    updateNodeState(taskId, 'merged');
+  }
+}
+
+function updateCIStatus(data) {
+  const taskId = prTaskMap[data.pr_number];
+  if (!taskId) {
+    return;
+  }
+
+  if (data.status === 'in_progress') {
+    updateNodeState(taskId, 'running');
+  }
+  if (data.conclusion === 'failure') {
+    updateNodeState(taskId, 'blocked');
+  }
+  if (data.conclusion === 'success') {
+    updateNodeState(taskId, 'pr_opened');
+  }
+}
+
+function connectAgentStatusSocket() {
+  try {
+    const socket = new WebSocket('ws://localhost:3000');
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'ci_update') {
+        updateCIStatus(data);
+      }
+      if (data.type === 'pr_update') {
+        updatePRStatus(data);
+      }
+    };
+  } catch (error) {
+    console.warn('Unable to connect agent status socket.', error);
+  }
+}
+
+workspaceTabButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setWorkspacePanel(button.dataset.workspacePanel || 'chat');
+  });
+});
+
+if (runAgentsButton) {
+  runAgentsButton.addEventListener('click', runMultiAgent);
+}
+
+setWorkspacePanel('chat');
+connectAgentStatusSocket();
 
 setStatusOnline(false);
 updateGenerationIndicator();
