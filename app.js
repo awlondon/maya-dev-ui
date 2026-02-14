@@ -12299,6 +12299,7 @@ document.addEventListener('keydown', (event) => {
 
 const WORKSPACE_PANELS = ['pipeline', 'chat', 'code', 'console', 'agents'];
 const agentTaskLogs = {};
+const executionState = {};
 const TASK_STAGES = {
   planning: 0,
   pr_opened: 1,
@@ -12308,6 +12309,16 @@ const TASK_STAGES = {
   merged: 5,
   failed: -1
 };
+
+const agentNodePulseStyle = document.createElement('style');
+agentNodePulseStyle.innerHTML = `
+@keyframes pulse {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+`;
+document.head.appendChild(agentNodePulseStyle);
 
 function getCurrentPrompt() {
   return getPromptInput() || getEditorValue() || '';
@@ -12343,6 +12354,9 @@ function clearAgentTaskLogs() {
   }
   Object.keys(agentTaskLogs).forEach((taskId) => {
     delete agentTaskLogs[taskId];
+  });
+  Object.keys(executionState).forEach((taskId) => {
+    delete executionState[taskId];
   });
 }
 
@@ -12452,6 +12466,9 @@ function updateTaskStage(taskId, newStage) {
   }
 
   taskLog.currentStage = newStage;
+  executionState[taskId] = {
+    stage: newStage
+  };
 
   let percent = 0;
 
@@ -12477,6 +12494,36 @@ function updateTaskStage(taskId, newStage) {
   }
 
   taskLog.progressFill.style.width = `${percent}%`;
+  updateExecutionNodeVisual(taskId, newStage);
+}
+
+function updateExecutionNodeVisual(taskId, stage) {
+  const node = document.getElementById(`node-${taskId}`);
+  if (!node) {
+    return;
+  }
+
+  if (stage === TASK_STAGES.failed) {
+    node.setAttribute('fill', '#ff4d6d');
+    node.setAttribute('stroke', '#ff4d6d');
+    node.style.animation = '';
+  } else if (stage === TASK_STAGES.merged) {
+    node.setAttribute('fill', '#00ff88');
+    node.setAttribute('stroke', '#00ff88');
+    node.style.animation = '';
+  } else if (stage === TASK_STAGES.ci_running) {
+    node.setAttribute('fill', '#ffaa00');
+    node.setAttribute('stroke', '#ffaa00');
+    node.style.animation = 'pulse 1s infinite';
+  } else if (stage >= TASK_STAGES.pr_opened) {
+    node.setAttribute('fill', '#00f2ff');
+    node.setAttribute('stroke', '#00f2ff');
+    node.style.animation = '';
+  } else {
+    node.setAttribute('fill', '#444');
+    node.setAttribute('stroke', '#555');
+    node.style.animation = '';
+  }
 }
 
 function appendConsole(msg) {
@@ -12503,7 +12550,9 @@ function renderExecutionMap(graph) {
     circle.setAttribute('cx', String(100 + i * 80));
     circle.setAttribute('cy', '100');
     circle.setAttribute('r', '20');
-    circle.setAttribute('fill', '#00f2ff');
+    circle.setAttribute('fill', '#444');
+    circle.setAttribute('stroke', '#555');
+    circle.setAttribute('id', `node-${task.id}`);
     circle.dataset.taskId = task.id;
 
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -12515,6 +12564,10 @@ function renderExecutionMap(graph) {
 
     svg.appendChild(circle);
     svg.appendChild(text);
+
+    if (executionState[task.id]) {
+      updateExecutionNodeVisual(task.id, executionState[task.id].stage);
+    }
   });
 }
 
