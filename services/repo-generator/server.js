@@ -49,6 +49,23 @@ function broadcast(data) {
   }
 }
 
+function normalizeSemanticEvents(input) {
+  if (!Array.isArray(input)) return [];
+
+  return input.flatMap((entry) => {
+    if (Array.isArray(entry)) return normalizeSemanticEvents(entry);
+    if (!entry || typeof entry !== 'object') return [];
+    if (typeof entry.type !== 'string') return [];
+
+    return [
+      {
+        type: entry.type,
+        name: entry.name,
+      },
+    ];
+  });
+}
+
 const REQUIRED_ENV = ['GITHUB_TOKEN', 'GITHUB_OWNER'];
 const missingEnv = REQUIRED_ENV.filter((name) => !process.env[name]);
 if (missingEnv.length) {
@@ -832,7 +849,16 @@ app.get('/', (_req, res) => {
       div.className = 'task error';
 
       const reasons = (policy.reasons || []).map((reason) => '<li>' + reason + '</li>').join('');
-      div.innerHTML = '<strong>Blocked (' + policy.risk_level + ')</strong><ul>' + reasons + '</ul>';
+      const semantic = policy.semantic_risk || {};
+      const semanticHits = (semantic.hits || [])
+        .slice(0, 5)
+        .map((hit) => '<li>' + hit.type + (hit.name ? ' (' + hit.name + ')' : '') + ' · w=' + hit.weight + '</li>')
+        .join('');
+      const semanticHtml = semantic.score !== undefined
+        ? '<div><strong>Semantic risk:</strong> ' + semantic.score + ' (' + (semantic.band || 'unknown') + ')</div>'
+          + (semanticHits ? '<ul>' + semanticHits + '</ul>' : '')
+        : '';
+      div.innerHTML = '<strong>Blocked (' + policy.risk_level + ')</strong><ul>' + reasons + '</ul>' + semanticHtml;
       panel.appendChild(div);
     }
 
@@ -1053,8 +1079,11 @@ app.post('/multi-agent-run', async (req, res) => {
     for (const task of tasks) {
       const patch = coderAgent({ objective, task });
       const verdict = verifierAgent({ task, patch });
+      const semanticPreview = normalizeSemanticEvents(execution.semantic_preview);
+      const patchSemantic = normalizeSemanticEvents(patch.semantic);
       const diffSummary = {
         files: (patch.commits || []).flatMap((commit) => (commit.files || []).map((file) => file.path)),
+        semantic: [...patchSemantic, ...semanticPreview],
       };
       const budgetTelemetry = {
         tokens_used: execution.tokens_used || 0,
