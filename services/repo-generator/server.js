@@ -359,6 +359,20 @@ app.get('/', (_req, res) => {
     </div>
   </div>
   <div id="log-panel"></div>
+  <div id="tooltip" style="
+    position:fixed;
+    display:none;
+    max-width:360px;
+    background:#0a0a12;
+    border:1px solid #2a2a3a;
+    padding:10px 12px;
+    color:#e6e6f0;
+    font-family: monospace;
+    font-size:12px;
+    z-index:9999;
+    pointer-events:none;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+  "></div>
 
   <script>
     const statusEl = document.getElementById('status');
@@ -366,6 +380,8 @@ app.get('/', (_req, res) => {
     const runButton = document.getElementById('runButton');
     const prTaskMap = {};
     const shaTaskMap = {};
+    let edgeMap = new Map();
+    let taskMeta = {};
 
     let graphState = {
       tasks: [],
@@ -373,6 +389,12 @@ app.get('/', (_req, res) => {
       nodeMap: {},
       pulseIntervals: {},
     };
+
+    function normalizeTask(task) {
+      const id = task.id || task.task_id;
+      const dependencies = task.dependencies || task.depends_on || [];
+      return { ...task, id, dependencies };
+    }
 
     function stopPulse(taskId) {
       if (!graphState.pulseIntervals[taskId]) return;
@@ -539,7 +561,7 @@ app.get('/', (_req, res) => {
 
       Object.keys(graphState.pulseIntervals).forEach((taskId) => stopPulse(taskId));
 
-      const tasks = (taskGraph && taskGraph.tasks) || [];
+      const tasks = ((taskGraph && taskGraph.tasks) || []).map(normalizeTask).filter((task) => Boolean(task.id));
       if (!tasks.length) return;
 
       const width = svg.clientWidth || svg.getBoundingClientRect().width || 900;
@@ -558,6 +580,7 @@ app.get('/', (_req, res) => {
       graphState.tasks = tasks;
       graphState.edges = [];
       graphState.nodeMap = {};
+      edgeMap = new Map();
 
       const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
       const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
@@ -583,20 +606,33 @@ app.get('/', (_req, res) => {
         }
       }
 
+      function edgeKey(a, b) {
+        return a + '->' + b;
+      }
+
+      function makeCurvePath(a, b) {
+        const dx = Math.max(40, (b.x - a.x) * 0.6);
+        const c1 = { x: a.x + dx, y: a.y };
+        const c2 = { x: b.x - dx, y: b.y };
+        return 'M ' + a.x + ' ' + a.y + ' C ' + c1.x + ' ' + c1.y + ', ' + c2.x + ' ' + c2.y + ', ' + b.x + ' ' + b.y;
+      }
+
       for (const edge of graphState.edges) {
         const start = positions[edge.from];
         const end = positions[edge.to];
         if (!start || !end) continue;
 
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', start.x);
-        line.setAttribute('y1', start.y);
-        line.setAttribute('x2', end.x);
-        line.setAttribute('y2', end.y);
-        line.setAttribute('stroke', '#555');
-        line.setAttribute('stroke-width', '2');
-        line.setAttribute('marker-end', 'url(#arrow)');
-        svg.appendChild(line);
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', makeCurvePath(start, end));
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', '#4a4a5a');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('opacity', '0.9');
+        path.setAttribute('marker-end', 'url(#arrow)');
+        path.setAttribute('data-edge', edgeKey(edge.from, edge.to));
+
+        svg.appendChild(path);
+        edgeMap.set(edgeKey(edge.from, edge.to), path);
       }
 
       const radius = 28;
@@ -609,6 +645,7 @@ app.get('/', (_req, res) => {
 
         const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         g.setAttribute('data-task', taskId);
+        g.style.cursor = 'default';
 
         const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         circle.setAttribute('cx', position.x);
@@ -639,8 +676,81 @@ app.get('/', (_req, res) => {
         g.appendChild(label);
         svg.appendChild(g);
 
+        g.addEventListener('mouseenter', (ev) => {
+          const meta = taskMeta[task.id] || taskMeta[taskId] || {};
+          const pr = meta.pr_url ? '<div>PR: <span style="color:#00f2ff">' + meta.pr_url + '</span></div>' : '';
+          const policy = meta.policy && meta.policy.reasons
+            ? '<div style="margin-top:6px;color:#ff4d6d">Policy:</div><ul style="margin:4px 0 0 16px;padding:0">'
+                + meta.policy.reasons.slice(0, 4).map((reason) => '<li>' + reason + '</li>').join('')
+                + '</ul>'
+            : '';
+
+          const html = '<div style="color:#00f2ff;font-weight:bold">' + taskId + (task.title ? ' — ' + task.title : '') + '</div>'
+            + '<div style="color:#9aa;margin-top:4px">' + (task.description || meta.description || '') + '</div>'
+            + pr
+            + policy;
+          showTooltip(html, ev.clientX, ev.clientY);
+        });
+        g.addEventListener('mousemove', (ev) => moveTooltip(ev.clientX, ev.clientY));
+        g.addEventListener('mouseleave', hideTooltip);
+
         graphState.nodeMap[taskId] = { x: position.x, y: position.y, circle };
       });
+    }
+
+    function setEdgeStyle(from, to, mode) {
+      const path = edgeMap.get(from + '->' + to);
+      if (!path) return;
+
+      if (mode === 'active') {
+        path.setAttribute('stroke', '#00f2ff');
+        path.setAttribute('stroke-width', '3.5');
+        path.setAttribute('opacity', '1');
+      } else if (mode === 'done') {
+        path.setAttribute('stroke', '#00ff88');
+        path.setAttribute('stroke-width', '3');
+        path.setAttribute('opacity', '1');
+      } else if (mode === 'blocked') {
+        path.setAttribute('stroke', '#ff4d6d');
+        path.setAttribute('stroke-width', '3');
+        path.setAttribute('opacity', '1');
+      } else {
+        path.setAttribute('stroke', '#4a4a5a');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('opacity', '0.9');
+      }
+    }
+
+    function highlightIncoming(taskId, mode) {
+      for (const edge of graphState.edges) {
+        if (edge.to === taskId) setEdgeStyle(edge.from, edge.to, mode);
+      }
+    }
+
+    function highlightOutgoing(taskId, mode) {
+      for (const edge of graphState.edges) {
+        if (edge.from === taskId) setEdgeStyle(edge.from, edge.to, mode);
+      }
+    }
+
+    function showTooltip(html, x, y) {
+      const tip = document.getElementById('tooltip');
+      tip.innerHTML = html;
+      tip.style.left = x + 12 + 'px';
+      tip.style.top = y + 12 + 'px';
+      tip.style.display = 'block';
+    }
+
+    function moveTooltip(x, y) {
+      const tip = document.getElementById('tooltip');
+      if (tip.style.display !== 'block') return;
+      tip.style.left = x + 12 + 'px';
+      tip.style.top = y + 12 + 'px';
+    }
+
+    function hideTooltip() {
+      const tip = document.getElementById('tooltip');
+      tip.style.display = 'none';
     }
 
     function updateNodeState(taskId, state) {
@@ -656,6 +766,17 @@ app.get('/', (_req, res) => {
       };
 
       node.circle.setAttribute('fill', colors[state] || '#444');
+
+      if (state === 'running') {
+        highlightIncoming(taskId, 'active');
+        highlightOutgoing(taskId, 'active');
+      } else if (state === 'merged') {
+        highlightIncoming(taskId, 'done');
+        highlightOutgoing(taskId, 'done');
+      } else if (state === 'blocked') {
+        highlightIncoming(taskId, 'blocked');
+        highlightOutgoing(taskId, 'blocked');
+      }
 
       if (state === 'running') {
         pulse(taskId, node.circle);
@@ -692,6 +813,7 @@ app.get('/', (_req, res) => {
         prTaskMap[task.pr_number] = taskId;
         const sha = task.sha || task.pr_head_sha || '';
         if (sha) shaTaskMap[sha] = taskId;
+        taskMeta[taskId] = { ...(taskMeta[taskId] || {}), pr_url: task.pr_url || (task.pr_number ? 'https://github.com/pulls/' + task.pr_number : undefined) };
         updateNodeState(taskId, 'pr_opened');
 
         const div = document.createElement('div');
@@ -717,6 +839,37 @@ app.get('/', (_req, res) => {
     function updateBudget(budget) {
       const panel = document.getElementById('budgetPanel');
       panel.innerHTML = 'Tokens: ' + budget.tokens_used + '<br/>API Calls: ' + budget.api_calls;
+    }
+
+    function ingestRunResponse(data, fallbackTasks = []) {
+      const graphTasks = (data.task_graph && data.task_graph.tasks) || fallbackTasks || data.tasks || [];
+      buildExecutionGraph({ tasks: graphTasks });
+      graphTasks.forEach((task) => updateNodeState(task.task_id || task.id, 'planned'));
+
+      taskMeta = {};
+      graphTasks.forEach((task) => {
+        const taskId = task.task_id || task.id;
+        if (!taskId) return;
+        taskMeta[taskId] = {
+          ...(taskMeta[taskId] || {}),
+          title: task.title,
+          description: task.description,
+        };
+      });
+
+      for (const task of data.tasks || []) {
+        const taskId = task.task_id || task.id;
+        if (!taskId) continue;
+
+        taskMeta[taskId] = taskMeta[taskId] || {};
+        if (task.title) taskMeta[taskId].title = task.title;
+        if (task.description) taskMeta[taskId].description = task.description;
+        if (task.pr_url) taskMeta[taskId].pr_url = task.pr_url;
+        if (task.policy) taskMeta[taskId].policy = task.policy;
+
+        if (task.status === 'pr_opened') updateNodeState(taskId, 'pr_opened');
+        if (task.status === 'blocked_by_policy') updateNodeState(taskId, 'blocked');
+      }
     }
 
     async function runTasks() {
@@ -751,9 +904,7 @@ app.get('/', (_req, res) => {
       const data = await response.json();
       Object.keys(prTaskMap).forEach((key) => delete prTaskMap[key]);
       Object.keys(shaTaskMap).forEach((key) => delete shaTaskMap[key]);
-      const graphTasks = (data.task_graph && data.task_graph.tasks) || payload.tasks || data.tasks || [];
-      buildExecutionGraph({ tasks: graphTasks });
-      graphTasks.forEach((task) => updateNodeState(task.task_id || task.id, 'planned'));
+      ingestRunResponse(data, payload.tasks || []);
       renderTasks(data.tasks || []);
       renderPRs(data.tasks || []);
 
@@ -791,14 +942,15 @@ app.get('/', (_req, res) => {
 
     function updateCIStatus(data) {
       const el = document.querySelector('[data-sha="' + data.sha + '"]');
-      if (!el) return;
 
       const taskId = prTaskMap[data.pr_number] || shaTaskMap[data.sha];
-      if (data.conclusion === 'success') {
-        updateNodeState(taskId, 'merged');
-      } else if (data.status === 'in_progress') {
+      if (data.status === 'in_progress') {
         updateNodeState(taskId, 'running');
+      } else if (data.conclusion === 'failure') {
+        updateNodeState(taskId, 'blocked');
       }
+
+      if (!el) return;
 
       el.classList.remove('running', 'done', 'error');
       if (data.status === 'in_progress') el.classList.add('running');
