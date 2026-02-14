@@ -339,6 +339,9 @@ app.get('/', (_req, res) => {
   ],
   "execution": { "auto_merge": false, "enable_pages": true }
 }</textarea>
+
+      <h3>Execution Graph</h3>
+      <svg id="executionGraph" width="100%" height="400"></svg>
     </div>
 
     <div class="panel stack">
@@ -361,6 +364,142 @@ app.get('/', (_req, res) => {
     const statusEl = document.getElementById('status');
     const logPanel = document.getElementById('log-panel');
     const runButton = document.getElementById('runButton');
+    const prTaskMap = {};
+    const shaTaskMap = {};
+
+    let graphState = {
+      tasks: [],
+      edges: [],
+      nodeMap: {},
+      pulseIntervals: {},
+    };
+
+    function stopPulse(taskId) {
+      if (!graphState.pulseIntervals[taskId]) return;
+      clearInterval(graphState.pulseIntervals[taskId]);
+      delete graphState.pulseIntervals[taskId];
+    }
+
+    function pulse(taskId, circle) {
+      if (!circle || graphState.pulseIntervals[taskId]) return;
+
+      const cx = Number(circle.getAttribute('cx') || 0);
+      const cy = Number(circle.getAttribute('cy') || 0);
+      let scale = 1;
+      let growing = true;
+
+      graphState.pulseIntervals[taskId] = setInterval(() => {
+        scale += growing ? 0.02 : -0.02;
+
+        if (scale > 1.1) growing = false;
+        if (scale < 1) growing = true;
+
+        circle.setAttribute('transform', 'translate(' + cx + ' ' + cy + ') scale(' + scale + ') translate(' + -cx + ' ' + -cy + ')');
+      }, 50);
+    }
+
+    function drawEdges() {
+      const svg = document.getElementById('executionGraph');
+
+      graphState.edges.forEach((edge) => {
+        const fromNode = graphState.nodeMap[edge.from];
+        const toNode = graphState.nodeMap[edge.to];
+
+        if (!fromNode || !toNode) return;
+
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', fromNode.x);
+        line.setAttribute('y1', fromNode.y);
+        line.setAttribute('x2', toNode.x);
+        line.setAttribute('y2', toNode.y);
+        line.setAttribute('stroke', '#555');
+        line.setAttribute('stroke-width', '2');
+
+        svg.insertBefore(line, svg.firstChild);
+      });
+    }
+
+    function buildExecutionGraph(taskGraph) {
+      const svg = document.getElementById('executionGraph');
+      svg.innerHTML = '';
+
+      Object.keys(graphState.pulseIntervals).forEach((taskId) => stopPulse(taskId));
+
+      const tasks = (taskGraph && taskGraph.tasks) || [];
+      graphState.tasks = tasks;
+      graphState.edges = [];
+      graphState.nodeMap = {};
+
+      const width = svg.clientWidth || svg.getBoundingClientRect().width || 800;
+      const height = svg.clientHeight || svg.getBoundingClientRect().height || 400;
+
+      const radius = 30;
+      const spacingX = width / (tasks.length + 1 || 1);
+      const centerY = height / 2;
+
+      tasks.forEach((task, i) => {
+        const taskId = task.id || task.task_id;
+        if (!taskId) return;
+
+        const x = spacingX * (i + 1);
+        const y = centerY;
+
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('data-task', taskId);
+
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', x);
+        circle.setAttribute('cy', y);
+        circle.setAttribute('r', radius);
+        circle.setAttribute('fill', '#444');
+        circle.setAttribute('stroke', '#00f2ff');
+        circle.setAttribute('stroke-width', '2');
+
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', x);
+        text.setAttribute('y', y + 5);
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('fill', '#fff');
+        text.setAttribute('font-size', '12');
+        text.textContent = taskId;
+
+        g.appendChild(circle);
+        g.appendChild(text);
+        svg.appendChild(g);
+
+        graphState.nodeMap[taskId] = { x, y, circle };
+
+        if (task.dependencies) {
+          task.dependencies.forEach((dep) => {
+            graphState.edges.push({ from: dep, to: taskId });
+          });
+        }
+      });
+
+      drawEdges();
+    }
+
+    function updateNodeState(taskId, state) {
+      const node = graphState.nodeMap[taskId];
+      if (!node) return;
+
+      const colors = {
+        planned: '#444',
+        pr_opened: '#00f2ff',
+        running: '#ffaa00',
+        blocked: '#ff4d6d',
+        merged: '#00ff88',
+      };
+
+      node.circle.setAttribute('fill', colors[state] || '#444');
+
+      if (state === 'running') {
+        pulse(taskId, node.circle);
+      } else {
+        stopPulse(taskId);
+        node.circle.removeAttribute('transform');
+      }
+    }
 
     function renderTasks(tasks) {
       const container = document.getElementById('taskList');
@@ -369,8 +508,13 @@ app.get('/', (_req, res) => {
       tasks.forEach((task) => {
         const div = document.createElement('div');
         div.className = 'task';
-        div.innerText = task.task_id + ' - ' + task.status;
+        const taskId = task.task_id || task.id;
+        div.innerText = taskId + ' - ' + task.status;
         container.appendChild(div);
+
+        if (task.status === 'blocked_by_policy') {
+          updateNodeState(taskId, 'blocked');
+        }
       });
     }
 
@@ -380,6 +524,11 @@ app.get('/', (_req, res) => {
 
       tasks.forEach((task) => {
         if (!task.pr_number) return;
+        const taskId = task.task_id || task.id;
+        prTaskMap[task.pr_number] = taskId;
+        const sha = task.sha || task.pr_head_sha || '';
+        if (sha) shaTaskMap[sha] = taskId;
+        updateNodeState(taskId, 'pr_opened');
 
         const div = document.createElement('div');
         div.id = 'pr-' + task.pr_number;
@@ -429,6 +578,10 @@ app.get('/', (_req, res) => {
       });
 
       const data = await response.json();
+      Object.keys(prTaskMap).forEach((key) => delete prTaskMap[key]);
+      Object.keys(shaTaskMap).forEach((key) => delete shaTaskMap[key]);
+      buildExecutionGraph({ tasks: data.tasks || [] });
+      (data.tasks || []).forEach((task) => updateNodeState(task.task_id || task.id, 'planned'));
       renderTasks(data.tasks || []);
       renderPRs(data.tasks || []);
 
@@ -468,6 +621,13 @@ app.get('/', (_req, res) => {
       const el = document.querySelector('[data-sha="' + data.sha + '"]');
       if (!el) return;
 
+      const taskId = prTaskMap[data.pr_number] || shaTaskMap[data.sha];
+      if (data.conclusion === 'success') {
+        updateNodeState(taskId, 'merged');
+      } else if (data.status === 'in_progress') {
+        updateNodeState(taskId, 'running');
+      }
+
       el.classList.remove('running', 'done', 'error');
       if (data.status === 'in_progress') el.classList.add('running');
       if (data.conclusion === 'success') el.classList.add('done');
@@ -476,10 +636,14 @@ app.get('/', (_req, res) => {
     }
 
     function updatePRStatus(data) {
+      const taskId = prTaskMap[data.pr_number] || shaTaskMap[data.sha];
+      if (data.sha && taskId) shaTaskMap[data.sha] = taskId;
+
       const prEl = document.getElementById('pr-' + data.pr_number);
       if (!prEl) return;
 
       if (data.merged) {
+        updateNodeState(taskId, 'merged');
         prEl.classList.remove('running');
         prEl.classList.add('done');
         prEl.innerText = 'PR #' + data.pr_number + ' - Merged';
