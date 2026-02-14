@@ -12314,6 +12314,18 @@ function appendAgentLog(msg) {
   log.scrollTop = log.scrollHeight;
 }
 
+function appendAgentLogColored(msg, color) {
+  const log = document.getElementById('agent-log');
+  if (!log) {
+    return;
+  }
+  const line = document.createElement('div');
+  line.innerText = msg;
+  line.style.color = color;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
 function appendConsole(msg) {
   const out = document.getElementById('agent-console-output');
   if (!out) {
@@ -12452,6 +12464,7 @@ function mountAgentSidePanel() {
 
   document.body.appendChild(agentSidePanel);
   wireAgentPanelEvents();
+  initAgentWebSocket();
 
   const persistedState = safeStorageGet('maya_agent_side_panel_open');
   agentPanelOpen = persistedState === 'true';
@@ -12686,7 +12699,7 @@ function updatePRStatus(data) {
 }
 
 function updateCIStatus(data) {
-  const taskId = prTaskMap[data.pr_number];
+  const taskId = data.task_id || prTaskMap[data.pr_number];
   if (!taskId) {
     return;
   }
@@ -12702,21 +12715,75 @@ function updateCIStatus(data) {
   }
 }
 
-function connectAgentStatusSocket() {
+function handleAgentStreamEvent(data) {
+  if (data.type === 'ci' || data.type === 'ci_update') {
+    updateCIStatus(data);
+
+    if (data.status === 'in_progress') {
+      appendAgentLogColored(`CI started for ${data.task_id || data.pr_number || 'unknown task'}`, '#ffaa00');
+    }
+
+    if (data.conclusion === 'success') {
+      appendAgentLogColored(`CI passed for ${data.task_id || data.pr_number || 'unknown task'}`, '#00ff88');
+    }
+
+    if (data.conclusion === 'failure') {
+      appendAgentLogColored(`CI failed for ${data.task_id || data.pr_number || 'unknown task'}`, '#ff4d6d');
+    }
+  }
+
+  if (data.type === 'pr' || data.type === 'pr_update') {
+    updatePRStatus(data);
+    appendAgentLogColored(`PR #${data.pr_number} ${data.merged ? 'merged' : 'updated'}`, '#00f2ff');
+  }
+
+  if (data.type === 'policy') {
+    appendAgentLogColored(
+      `Policy risk: ${data.risk_level}`,
+      data.risk_level === 'high' ? '#ff4d6d' : '#ffaa00'
+    );
+
+    if (Array.isArray(data.reasons)) {
+      data.reasons.forEach((reason) => appendAgentLog(` - ${reason}`));
+    }
+  }
+}
+
+let agentStatusSocket = null;
+
+function initAgentWebSocket() {
+  if (agentStatusSocket) {
+    return;
+  }
+
   try {
-    const socket = new WebSocket('ws://localhost:3000');
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//localhost:3000`);
+    agentStatusSocket = socket;
+
+    socket.onopen = () => {
+      appendAgentLog('Connected to CI stream.');
+    };
+
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'ci_update') {
-        updateCIStatus(data);
-      }
-      if (data.type === 'pr_update') {
-        updatePRStatus(data);
-      }
+      handleAgentStreamEvent(data);
+    };
+
+    socket.onerror = () => {
+      appendAgentLog('WebSocket error.');
+    };
+
+    socket.onclose = () => {
+      agentStatusSocket = null;
     };
   } catch (error) {
     console.warn('Unable to connect agent status socket.', error);
   }
+}
+
+function connectAgentStatusSocket() {
+  initAgentWebSocket();
 }
 
 ensureAgentsWorkspaceMounted();
