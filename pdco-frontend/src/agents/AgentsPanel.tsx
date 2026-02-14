@@ -9,6 +9,8 @@ import { analyzeFileSemanticDiff } from './semanticDiff';
 import { useAgentSocket } from './useAgentSocket';
 import type { AgentEvent, AgentRunResponse, PRTaskResult, TaskGraph } from './types';
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
+
 export default function AgentsPanel() {
   const [graph, setGraph] = useState<TaskGraph | null>(null);
   const [results, setResults] = useState<PRTaskResult[]>([]);
@@ -107,7 +109,7 @@ export default function AgentsPanel() {
   );
 
   const runAgents = useCallback(async () => {
-    const response = await fetch('http://localhost:3000/multi-agent-run', {
+    const response = await fetch(`${API_BASE}/api/agent/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

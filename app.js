@@ -12854,7 +12854,7 @@ function wireAgentPanelEvents() {
       appendAgentLog('Initializing execution...');
 
       try {
-        const res = await fetch('http://localhost:3000/multi-agent-run', {
+        const res = await fetch(`${API_BASE}/api/agent/runs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ objective: getCurrentPrompt() })
@@ -13143,7 +13143,7 @@ async function runMultiAgent() {
   clearAgentTaskLogs();
 
   try {
-    const response = await fetch('http://localhost:3000/multi-agent-run', {
+    const response = await fetch(`${API_BASE}/api/agent/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -13288,8 +13288,8 @@ function initAgentWebSocket() {
   }
 
   try {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(`${protocol}//localhost:3000`);
+    const socketUrl = API_BASE.replace(/^http/i, 'ws');
+    const socket = new WebSocket(socketUrl);
     agentStatusSocket = socket;
 
     socket.onopen = () => {
