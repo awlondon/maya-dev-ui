@@ -12300,6 +12300,7 @@ document.addEventListener('keydown', (event) => {
 const WORKSPACE_PANELS = ['pipeline', 'chat', 'code', 'console', 'agents'];
 const agentTaskLogs = {};
 const executionState = {};
+let dependencyMap = {};
 const TASK_STAGES = {
   planning: 0,
   pr_opened: 1,
@@ -12357,6 +12358,51 @@ function clearAgentTaskLogs() {
   });
   Object.keys(executionState).forEach((taskId) => {
     delete executionState[taskId];
+  });
+  dependencyMap = {};
+}
+
+function checkTaskEligibility(taskId) {
+  const deps = dependencyMap[taskId] || [];
+
+  return deps.every((dep) => executionState[dep] && executionState[dep].stage === TASK_STAGES.merged);
+}
+
+function applyGlow(node) {
+  node.setAttribute('stroke', '#00f2ff');
+  node.setAttribute('stroke-width', '3');
+  node.style.filter = 'drop-shadow(0 0 6px #00f2ff)';
+}
+
+function removeGlow(node) {
+  node.style.filter = '';
+}
+
+function updateDependencyGlow() {
+  Object.keys(dependencyMap).forEach((taskId) => {
+    const node = document.getElementById(`node-${taskId}`);
+    if (!node) {
+      return;
+    }
+
+    const stage = executionState[taskId]?.stage;
+    const eligible = checkTaskEligibility(taskId);
+
+    if (stage === TASK_STAGES.planning && eligible) {
+      applyGlow(node);
+    } else {
+      removeGlow(node);
+      if (stage === TASK_STAGES.planning) {
+        node.setAttribute('stroke', '#555');
+        node.setAttribute('stroke-width', '1');
+      }
+    }
+
+    if (!eligible && stage === TASK_STAGES.planning) {
+      node.setAttribute('opacity', '0.4');
+    } else {
+      node.setAttribute('opacity', '1');
+    }
   });
 }
 
@@ -12495,6 +12541,7 @@ function updateTaskStage(taskId, newStage) {
 
   taskLog.progressFill.style.width = `${percent}%`;
   updateExecutionNodeVisual(taskId, newStage);
+  updateDependencyGlow();
 }
 
 function updateExecutionNodeVisual(taskId, stage) {
@@ -12544,6 +12591,11 @@ function renderExecutionMap(graph) {
   }
 
   svg.innerHTML = '';
+  dependencyMap = {};
+
+  graph.tasks.forEach((task) => {
+    dependencyMap[task.id] = task.dependencies || [];
+  });
 
   graph.tasks.forEach((task, i) => {
     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -12569,6 +12621,8 @@ function renderExecutionMap(graph) {
       updateExecutionNodeVisual(task.id, executionState[task.id].stage);
     }
   });
+
+  updateDependencyGlow();
 }
 
 function wireAgentPanelEvents() {
