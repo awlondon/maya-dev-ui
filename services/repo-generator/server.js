@@ -4,6 +4,7 @@ import http from 'node:http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { plannerAgent, coderAgent, verifierAgent } from './agents.js';
+import { evaluatePolicy, buildPolicyConfig } from './policy.js';
 
 function loadDotEnv() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -58,6 +59,7 @@ const OWNER = process.env.GITHUB_OWNER;
 const TOKEN = process.env.GITHUB_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
 const API_URL = 'https://api.github.com';
+const policyConfig = buildPolicyConfig();
 
 function slugifyRepoName(s) {
   return (
@@ -436,12 +438,28 @@ app.post('/multi-agent-run', async (req, res) => {
     for (const task of tasks) {
       const patch = coderAgent({ objective, task });
       const verdict = verifierAgent({ task, patch });
+      const diffSummary = {
+        files: (patch.commits || []).flatMap((commit) => (commit.files || []).map((file) => file.path)),
+      };
+      const budgetTelemetry = {
+        tokens_used: execution.tokens_used || 0,
+        api_calls: execution.api_calls || 0,
+      };
+      const policy = evaluatePolicy({
+        task,
+        verifier: verdict,
+        ci: { conclusion: execution.ci_conclusion || 'success' },
+        diffSummary,
+        budget: budgetTelemetry,
+        config: policyConfig,
+      });
 
-      if (verdict.status !== 'pass') {
+      if (!policy.allow_merge) {
         results.push({
           task_id: task.id,
-          status: 'blocked',
+          status: 'blocked_by_policy',
           verdict,
+          policy,
         });
         continue;
       }
@@ -477,6 +495,7 @@ app.post('/multi-agent-run', async (req, res) => {
         branch: patch.branch,
         pr_number: pr.number,
         verifier: verdict.status,
+        policy,
         merge,
       });
     }
