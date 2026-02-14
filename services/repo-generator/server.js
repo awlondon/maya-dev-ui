@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import express from 'express';
+import { WebSocketServer } from 'ws';
 
 function loadDotEnv() {
   const envPath = path.resolve(process.cwd(), '.env');
@@ -23,7 +25,27 @@ function loadDotEnv() {
 loadDotEnv();
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 app.use(express.json({ limit: '1mb' }));
+
+let clients = [];
+
+wss.on('connection', (ws) => {
+  clients.push(ws);
+  ws.on('close', () => {
+    clients = clients.filter((client) => client !== ws);
+  });
+});
+
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  for (const client of clients) {
+    if (client.readyState === 1) {
+      client.send(message);
+    }
+  }
+}
 
 const REQUIRED_ENV = ['GITHUB_TOKEN', 'GITHUB_OWNER'];
 const missingEnv = REQUIRED_ENV.filter((name) => !process.env[name]);
@@ -227,6 +249,125 @@ async function mergeIfGreen(repo, prNumber) {
   return { merged: true };
 }
 
+app.get('/', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenClaw Orchestrator Cockpit</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; margin: 0; padding: 24px; background: #0b1020; color: #d6e0ff; }
+    h1 { margin-top: 0; }
+    #status { margin-bottom: 12px; color: #7ee7ff; }
+    #pr-list { display: grid; gap: 8px; }
+    .pr-card { border: 1px solid #304070; border-radius: 10px; padding: 12px; background: #111935; }
+    .running { border-color: #00bcd4; box-shadow: 0 0 0 1px #00bcd4 inset; }
+    .done { border-color: #17c964; box-shadow: 0 0 0 1px #17c964 inset; }
+    .error { border-color: #f31260; box-shadow: 0 0 0 1px #f31260 inset; }
+    .merged { color: #c084fc; }
+    #log-panel { margin-top: 16px; border: 1px solid #2d3d70; border-radius: 10px; padding: 10px; max-height: 260px; overflow-y: auto; background: #080d1d; }
+    #log-panel div { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>OpenClaw Execution Cockpit</h1>
+  <div id="status">Connecting...</div>
+  <div id="pr-list"></div>
+  <div id="log-panel"></div>
+
+  <script>
+    const prList = document.getElementById('pr-list');
+    const statusEl = document.getElementById('status');
+    const logPanel = document.getElementById('log-panel');
+
+    function ensurePRCard(data) {
+      const prId = 'pr-' + data.pr_number;
+      let div = document.getElementById(prId);
+      if (!div) {
+        div = document.createElement('div');
+        div.id = prId;
+        div.className = 'pr-card';
+        div.dataset.sha = data.sha || '';
+        div.innerText = 'PR #' + data.pr_number + ' - Open';
+        prList.prepend(div);
+      }
+      return div;
+    }
+
+    function appendLog(message) {
+      const line = document.createElement('div');
+      line.textContent = new Date().toISOString() + '  ' + message;
+      logPanel.prepend(line);
+    }
+
+    function updateCIStatus(data) {
+      const el = document.querySelector('[data-sha="' + data.sha + '"]');
+      if (!el) return;
+
+      el.classList.remove('running', 'done', 'error');
+      if (data.status === 'in_progress') el.classList.add('running');
+      if (data.conclusion === 'success') el.classList.add('done');
+      if (data.conclusion === 'failure') el.classList.add('error');
+      appendLog(data.repo + ' ' + data.status + ' ' + (data.conclusion || ''));
+    }
+
+    function updatePRStatus(data) {
+      const prEl = ensurePRCard(data);
+      prEl.classList.toggle('merged', Boolean(data.merged));
+      prEl.innerText = 'PR #' + data.pr_number + ' - ' + (data.merged ? 'Merged' : data.state);
+    }
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(protocol + '//' + location.host);
+
+    socket.onopen = () => {
+      statusEl.textContent = 'Connected to live event stream';
+    };
+
+    socket.onclose = () => {
+      statusEl.textContent = 'Disconnected';
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'ci_update') updateCIStatus(data);
+      if (data.type === 'pr_update') updatePRStatus(data);
+    };
+  </script>
+</body>
+</html>`);
+});
+
+app.post('/webhook', async (req, res) => {
+  const event = req.headers['x-github-event'];
+
+  if (event === 'check_run') {
+    const check = req.body.check_run;
+    broadcast({
+      type: 'ci_update',
+      repo: req.body.repository?.name,
+      sha: check?.head_sha,
+      status: check?.status,
+      conclusion: check?.conclusion || null,
+    });
+  }
+
+  if (event === 'pull_request') {
+    const pr = req.body.pull_request;
+    broadcast({
+      type: 'pr_update',
+      repo: req.body.repository?.name,
+      pr_number: pr?.number,
+      sha: pr?.head?.sha,
+      state: pr?.state,
+      merged: Boolean(pr?.merged),
+    });
+  }
+
+  res.sendStatus(200);
+});
+
 app.post('/generate-repo-with-prs', async (req, res) => {
   try {
     const { objective, tasks = [], execution = { auto_merge: false, enable_pages: true } } = req.body;
@@ -393,6 +534,6 @@ jobs:
   }
 });
 
-app.listen(PORT, () => {
-  console.log('Repo Generator + PR system on :3000');
+server.listen(PORT, () => {
+  console.log(`Server + WebSocket running on :${PORT}`);
 });
