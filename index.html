@@ -404,6 +404,12 @@
     </main>
 
     <main id="workspace">
+      <nav id="workspace-tab-bar" class="workspace-tab-bar" aria-label="Workspace panel navigation">
+        <button class="workspace-tab-button is-active" type="button" data-workspace-panel="chat">Chat</button>
+        <button class="workspace-tab-button" type="button" data-workspace-panel="code">Code</button>
+        <button class="workspace-tab-button" type="button" data-workspace-panel="console">Console</button>
+        <button class="workspace-tab-button" type="button" data-workspace-panel="agents">Agents</button>
+      </nav>
       <div id="left-pane" class="left-pane">
         <section id="chat-panel" class="panel">
           <div class="panel-header">
@@ -588,7 +594,32 @@
               </div>
             </div>
           </div>
-        </div>
+        </section>
+
+        <section id="agents-panel" class="panel agents-panel hidden" aria-label="Agents panel">
+          <div class="panel-header">
+            <span>Agents</span>
+          </div>
+          <div class="panel-body agents-panel-body">
+            <div class="agents-layout">
+              <div class="agents-graph-column">
+                <h3>Execution Graph</h3>
+                <svg id="executionGraph" width="100%" height="500"></svg>
+              </div>
+              <div class="agents-side-column">
+                <h3>PR Monitor</h3>
+                <div id="prList" class="agents-box"></div>
+
+                <h3>Policy Status</h3>
+                <div id="policyPanel" class="agents-box"></div>
+
+                <h3>Budget</h3>
+                <div id="budgetPanel" class="agents-box"></div>
+              </div>
+            </div>
+            <button id="runAgentsBtn" class="agents-run-button" type="button">Run via Agents</button>
+          </div>
+        </section>
       </div>
     </div>
     </main>

@@ -1035,10 +1035,34 @@ html, body {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr;
+  grid-template-rows: auto 1fr;
   gap: 16px;
   padding: 16px;
   height: calc(100vh - 64px);
+}
+
+.workspace-tab-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.workspace-tab-button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.workspace-tab-button.is-active {
+  border-color: var(--panel-border);
+  background: rgba(255, 255, 255, 0.09);
 }
 
 #left-pane {
@@ -1047,6 +1071,49 @@ html, body {
   height: 100%;
   gap: 16px;
   min-height: 0;
+}
+
+.agents-panel {
+  flex: 1;
+}
+
+.agents-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agents-layout {
+  display: flex;
+  gap: 20px;
+  min-height: 0;
+}
+
+.agents-graph-column {
+  flex: 1;
+}
+
+.agents-side-column {
+  width: 300px;
+}
+
+.agents-box {
+  padding: 8px;
+  background: #111;
+  border: 1px solid #333;
+  min-height: 100px;
+  overflow: auto;
+  margin-bottom: 12px;
+}
+
+.agents-run-button {
+  align-self: flex-start;
+  padding: 8px 12px;
+  border: none;
+  background: #00afff;
+  color: #000;
+  font-weight: 700;
+  border-radius: 6px;
 }
 
 #chat-panel {
