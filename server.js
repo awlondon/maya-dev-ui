@@ -1009,8 +1009,16 @@ function buildDeterministicDesignerSpec({ prompt = '' } = {}) {
   };
 }
 
+function sanitizeJsonCandidate(text = '') {
+  let source = String(text || '').trim();
+  source = source.replace(/^```json\s*/i, '');
+  source = source.replace(/^```\s*/i, '');
+  source = source.replace(/\s*```\s*$/i, '');
+  return source.trim();
+}
+
 function extractJsonObject(text = '') {
-  const source = String(text || '');
+  const source = sanitizeJsonCandidate(text);
   const start = source.indexOf('{');
   const end = source.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) {
@@ -1169,7 +1177,7 @@ function validateBuilderOutput(output, mode = 'single') {
   return { ok: failures.length === 0, failures };
 }
 
-async function callGameModeLlmJson({ system, user, temperature = 0.2 }) {
+async function callGameModeLlmJson({ system, user, temperature = 0.2, label = 'LLM' }) {
   if (!LLM_PROXY_URL) {
     throw new Error('LLM proxy unavailable');
   }
@@ -1188,12 +1196,18 @@ async function callGameModeLlmJson({ system, user, temperature = 0.2 }) {
   if (!workerRes.ok) {
     throw new Error(`LLM request failed (${workerRes.status})`);
   }
-  const text = await workerRes.text();
-  const data = text ? JSON.parse(text) : null;
+  const raw = await workerRes.text();
+  if (process.env.GAME_MODE_DEBUG_LLM === '1') {
+    console.log(`[LLM_RAW_${label}]`, String(raw || '').slice(0, 500));
+  }
+  const data = raw ? JSON.parse(raw) : null;
   const content = data?.choices?.[0]?.message?.content
     ?? data?.candidates?.[0]?.content
     ?? data?.output_text
     ?? '';
+  if (process.env.GAME_MODE_DEBUG_LLM === '1') {
+    console.log(`[LLM_CONTENT_${label}]`, String(content || '').slice(0, 500));
+  }
   return extractJsonObject(content);
 }
 
@@ -1209,11 +1223,11 @@ async function generateDesignerSpec({ mode, prompt, seedCode }) {
   }
 
   const seedPreview = String(seedCode || '').slice(0, 2000);
-  const system = 'Return only valid JSON. No markdown. No commentary. You must satisfy: auto-run game, requestAnimationFrame loop, win/lose conditions, no build step.';
+  const system = 'Return ONLY valid JSON. No markdown. No commentary. Do not include backticks. The first character must be "{" and the last character must be "}". If you cannot comply, return a valid JSON object with an "error" field. You must satisfy: auto-run game, requestAnimationFrame loop, win/lose conditions, no build step.';
   const user = `Design a shippable static game concept. mode=${mode}. user_prompt=${prompt || 'random concept required'}. seed_code_excerpt=${seedPreview || 'none'}. Output must exactly match schemaVersion 1.0 contract.`;
 
   try {
-    const spec = await callGameModeLlmJson({ system, user, temperature: 0.2 });
+    const spec = await callGameModeLlmJson({ system, user, temperature: 0.2, label: 'DESIGNER' });
     const validation = validateDesignerSpec(spec);
     if (!validation.ok) {
       return {
@@ -1248,11 +1262,11 @@ async function generateBuilderOutput({ mode, designerSpec, prompt }) {
     };
   }
 
-  const system = 'Return only valid JSON in the specified output schema. Must produce playable auto-running game with requestAnimationFrame on load. No external build tooling. Use Canvas 2D. Must display Score and show Game Over and Victory states. No console.error.';
+  const system = 'Return ONLY valid JSON in the specified output schema. Do not include markdown. Do not include backticks. The first character must be "{" and the last character must be "}". If you cannot comply, return a valid JSON object with an "error" field. Must produce playable auto-running game with requestAnimationFrame on load. No external build tooling. Use Canvas 2D. Must display Score and show Game Over and Victory states. No console.error.';
   const user = `mode=${mode}. designer_spec=${JSON.stringify(designerSpec)}. user_prompt=${prompt || ''}. Runtime verifier requires RAF heartbeat without user click.`;
 
   try {
-    const output = await callGameModeLlmJson({ system, user, temperature: 0.15 });
+    const output = await callGameModeLlmJson({ system, user, temperature: 0.15, label: 'BUILDER' });
     const validation = validateBuilderOutput(output, mode);
     if (!validation.ok) {
       return {
