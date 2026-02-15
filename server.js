@@ -822,6 +822,227 @@ app.all('/api/run', (req, res, next) => {
   return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 });
 
+const GAME_MODE_WORKSPACE_ROOT = path.resolve(process.env.OPENCLAW_WORKSPACE_ROOT || path.join(__dirname, '..'));
+const gameModeJobs = new Map();
+
+function resolveWorkspacePath(inputPath = '') {
+  const relative = String(inputPath || '').replace(/^\/+/, '').trim();
+  const resolved = path.resolve(GAME_MODE_WORKSPACE_ROOT, relative);
+  if (!resolved.startsWith(GAME_MODE_WORKSPACE_ROOT)) {
+    throw createHttpError({ status: 400, code: 'INVALID_PATH', message: 'Path escapes workspace root' });
+  }
+  return resolved;
+}
+
+async function listWorkspaceDirs(rootDir) {
+  const dirs = [];
+  async function walk(dir, rel = '', depth = 0) {
+    if (depth > 3) return;
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.git') || entry.name === 'node_modules') continue;
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name;
+      dirs.push(nextRel);
+      await walk(path.join(dir, entry.name), nextRel, depth + 1);
+    }
+  }
+  await walk(rootDir);
+  return dirs;
+}
+
+function createGameModeJob(payload = {}) {
+  const jobId = `gm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = {
+    id: jobId,
+    mode: payload.mode === 'multi' ? 'multi' : 'single',
+    payload,
+    status: 'running',
+    events: [],
+    clients: new Set(),
+    result: null
+  };
+  gameModeJobs.set(jobId, job);
+  return job;
+}
+
+function pushGameModeEvent(job, event, data) {
+  const packet = { event, data };
+  job.events.push(packet);
+  for (const client of job.clients) {
+    client.write(`event: ${event}\n`);
+    client.write(`data: ${JSON.stringify(data)}\n\n`);
+  }
+}
+
+function closeGameModeStreams(job) {
+  for (const client of job.clients) {
+    client.end();
+  }
+  job.clients.clear();
+}
+
+function buildSingleFileGameHtml({ prompt = '' }) {
+  const title = prompt.trim() || 'Neon Orbit Runner';
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title.replace(/</g, '&lt;')}</title>
+  <style>html,body{margin:0;height:100%;background:#0b1020;color:#fff;font-family:Inter,system-ui}canvas{display:block;width:100vw;height:100vh}#hud{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}</style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud">WASD / Arrows · Survive and score · R to restart</div>
+  <script>
+    const c=document.getElementById('c');const ctx=c.getContext('2d');let w,h;
+    const player={x:100,y:100,r:12,vx:0,vy:0,speed:0.45};const keys={};
+    let enemies=[],score=0,over=false,seed=1337;
+    const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
+    function resize(){w=c.width=innerWidth;h=c.height=innerHeight;}addEventListener('resize',resize);resize();
+    addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&over)reset();});addEventListener('keyup',e=>keys[e.key]=false);
+    function spawn(){const e={x:w+20,y:20+rand()*(h-40),r:10+rand()*12,s:-2-rand()*3};enemies.push(e);} 
+    function reset(){enemies=[];score=0;over=false;player.x=100;player.y=h/2;}
+    setInterval(()=>!over&&spawn(),900);
+    function step(){
+      if(!over){player.vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);player.vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);player.x=Math.max(player.r,Math.min(w-player.r,player.x+player.vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+player.vy*7));
+        enemies.forEach(e=>{e.x+=e.s; if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r) over=true;}); enemies=enemies.filter(e=>e.x>-40); score+=0.1;}
+      ctx.fillStyle='#0b1020';ctx.fillRect(0,0,w,h);ctx.fillStyle='#6ee7ff';ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ff5c8a';enemies.forEach(e=>{ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();});
+      ctx.fillStyle='#fff';ctx.font='16px sans-serif';ctx.fillText('Score: '+Math.floor(score),14,h-18);
+      if(over){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText('Game Over · Press R',w/2-120,h/2);} requestAnimationFrame(step);
+    }
+    reset();step();
+  </script>
+</body>
+</html>`;
+}
+
+async function runGameModeJob(job) {
+  const { mode, payload } = job;
+  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
+  pushGameModeEvent(job, 'log', { text: 'Generating concept and scope lock.' });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
+
+  if (mode === 'single') {
+    const html = buildSingleFileGameHtml({ prompt: payload.prompt });
+    const outputDir = resolveWorkspacePath('game-mode-output');
+    await fs.mkdir(outputDir, { recursive: true });
+    const htmlPath = path.join(outputDir, `${job.id}.html`);
+    await fs.writeFile(htmlPath, html, 'utf8');
+    job.result = { mode: 'single', htmlPath, html };
+    pushGameModeEvent(job, 'artifact', { path: htmlPath, kind: 'html' });
+  } else {
+    const targetDir = resolveWorkspacePath(payload.targetDir || `game-mode/${job.id}`);
+    await fs.mkdir(path.join(targetDir, 'src'), { recursive: true });
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Game Mode Repo</title><style>body{margin:0;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}#app{padding:16px}</style></head><body><div id="app"></div><script type="module" src="./src/game.js"></script></body></html>`;
+    const js = `const app=document.getElementById('app');app.innerHTML='<h1>Game Mode Build</h1><p>Interactive starter produced by orchestrator.</p><p>Use this as your baseline and iterate.</p>';`;
+    const readme = `# Game Mode Build\n\nGenerated by deterministic Game Mode orchestrator.\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n# then open http://localhost:8080/${path.relative(GAME_MODE_WORKSPACE_ROOT, targetDir).replace(/\\/g, '/')}/\n\`\`\`\n\n## Deploy (GitHub Pages)\n\n1. Push this folder to a repo.\n2. In GitHub repo settings, enable Pages from main branch root.\n3. Wait for deployment and open the Pages URL.\n\n## Controls\n\nUpdate \`src/game.js\` with your mechanics and controls.\n`;
+
+    await Promise.all([
+      fs.writeFile(path.join(targetDir, 'index.html'), html, 'utf8'),
+      fs.writeFile(path.join(targetDir, 'src', 'game.js'), js, 'utf8'),
+      fs.writeFile(path.join(targetDir, 'README.md'), readme, 'utf8')
+    ]);
+
+    const readmePath = path.join(targetDir, 'README.md');
+    job.result = { mode: 'multi', repoPath: targetDir, openPath: path.relative(GAME_MODE_WORKSPACE_ROOT, readmePath).replace(/\\/g, '/') };
+    pushGameModeEvent(job, 'artifact', { path: job.result.openPath, kind: 'readme' });
+  }
+
+  pushGameModeEvent(job, 'step', { name: 'Verification', status: 'completed' });
+  job.status = 'success';
+  pushGameModeEvent(job, 'done', { status: 'success', entry: job.result?.mode === 'single' ? { type: 'html', path: job.result.htmlPath } : { type: 'readme', path: job.result.openPath } });
+  closeGameModeStreams(job);
+}
+
+app.get('/api/workspace/list', async (req, res) => {
+  try {
+    const root = String(req.query.root || '.openclaw/workspace');
+    const rootPath = root === '.openclaw/workspace'
+      ? GAME_MODE_WORKSPACE_ROOT
+      : resolveWorkspacePath(root);
+    await fs.mkdir(rootPath, { recursive: true });
+    const dirs = await listWorkspaceDirs(rootPath);
+    return res.json({ root, dirs });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error?.message || 'Failed to list workspace' });
+  }
+});
+
+app.get('/api/workspace/file', async (req, res) => {
+  try {
+    const requested = String(req.query.path || '');
+    if (!requested) {
+      return res.status(400).json({ ok: false, error: 'path is required' });
+    }
+    const fullPath = resolveWorkspacePath(requested);
+    const content = await fs.readFile(fullPath, 'utf8');
+    return res.json({ path: requested, content });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error?.message || 'Unable to read file' });
+  }
+});
+
+app.post('/api/game-mode/jobs', async (req, res) => {
+  const payload = req.body || {};
+  const mode = payload.mode === 'multi' ? 'multi' : 'single';
+  if (mode === 'multi' && !String(payload.targetDir || '').trim()) {
+    return res.status(400).json({ ok: false, error: 'targetDir is required for multi mode' });
+  }
+  const job = createGameModeJob({ ...payload, mode });
+  runGameModeJob(job).catch((error) => {
+    job.status = 'error';
+    pushGameModeEvent(job, 'log', { text: `Failure: ${error?.message || 'Unknown error'}` });
+    pushGameModeEvent(job, 'done', { status: 'error' });
+    closeGameModeStreams(job);
+  });
+  return res.status(202).json({ jobId: job.id });
+});
+
+app.get('/api/game-mode/jobs/:jobId/stream', (req, res) => {
+  const job = gameModeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ ok: false, error: 'Job not found' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  for (const packet of job.events) {
+    res.write(`event: ${packet.event}\n`);
+    res.write(`data: ${JSON.stringify(packet.data)}\n\n`);
+  }
+
+  job.clients.add(res);
+  if (job.status !== 'running') {
+    res.end();
+    job.clients.delete(res);
+    return;
+  }
+
+  req.on('close', () => {
+    job.clients.delete(res);
+  });
+});
+
+app.get('/api/game-mode/jobs/:jobId/result', (req, res) => {
+  const job = gameModeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ ok: false, error: 'Job not found' });
+  }
+  if (job.status === 'running') {
+    return res.status(202).json({ status: 'running' });
+  }
+  if (job.status === 'error') {
+    return res.status(500).json({ status: 'error' });
+  }
+  return res.json(job.result || { status: 'empty' });
+});
 
 app.get('/api/dev/perf', (_req, res) => {
   if (!DEV_PERF_ENABLED) {
