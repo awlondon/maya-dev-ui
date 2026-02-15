@@ -33,11 +33,7 @@ function resolveApiBase() {
     window.API_BASE ||
     (window.location.hostname === "localhost"
       ? "http://localhost:8080"
-      : null);
-
-  if (!apiBase && window.location.hostname !== "localhost") {
-    throw new Error("Missing API base URL in production.");
-  }
+      : "https://maya-api-136741418395.us-central1.run.app");
 
   return apiBase;
 }
