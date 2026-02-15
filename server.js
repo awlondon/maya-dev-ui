@@ -827,6 +827,7 @@ const JOB_TTL_MS = 30 * 60 * 1000;
 const JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_FIX_PASSES = 2;
 const GAME_MODE_RUNTIME_VERIFY_ENABLED = process.env.GAME_MODE_RUNTIME_VERIFY === '1';
+const GAME_MODE_LLM_ENABLED = process.env.GAME_MODE_LLM === '1';
 const LOAD_TIMEOUT_MS = 4000;
 const HEARTBEAT_TIMEOUT_MS = 1500;
 const POLL_INTERVAL_MS = 100;
@@ -966,41 +967,283 @@ function emitGameModeArtifact(job, artifact) {
   });
 }
 
-function buildSingleFileGameHtml({ prompt = '' }) {
-  const title = prompt.trim() || 'Neon Orbit Runner';
+function sanitizeTitle(value = '') {
+  return String(value || '').replace(/</g, '&lt;').slice(0, 120) || 'Neon Orbit Runner';
+}
+
+function buildDeterministicDesignerSpec({ prompt = '' } = {}) {
+  const trimmed = String(prompt || '').trim();
+  const title = trimmed ? `${trimmed.slice(0, 40)} Arena` : 'Neon Orbit Runner';
+  return {
+    schemaVersion: '1.0',
+    title,
+    tagline: 'Survive waves, score points, and reach victory before collapse.',
+    genre: 'arcade survival',
+    coreLoop: 'Move to dodge enemies, survive waves, and increase score until victory.',
+    controls: [
+      { input: 'WASD', action: 'Move player' },
+      { input: 'Arrow keys', action: 'Move player (alternate)' }
+    ],
+    entities: [
+      { name: 'Pilot', role: 'player', notes: 'Controlled by keyboard movement.' },
+      { name: 'Drones', role: 'enemy', notes: 'Spawn from edge and collide with player.' },
+      { name: 'HUD', role: 'ui', notes: 'Shows score and state.' }
+    ],
+    mechanics: [
+      { name: 'Wave pressure', description: 'Enemy spawn rate increases over time.', tuning: ['spawnIntervalMs', 'enemySpeed'] },
+      { name: 'Collision fail state', description: 'Contact with enemy triggers loss.', tuning: ['collisionRadius'] }
+    ],
+    progression: {
+      type: 'waves',
+      description: 'Every wave raises spawn pressure until score threshold is reached.'
+    },
+    winCondition: 'Reach score target before being hit.',
+    loseCondition: 'Player collides with any enemy.',
+    mustHave: ['Score UI', 'Game Over state', 'Victory state'],
+    constraints: {
+      autoRun: true,
+      requiresRafLoop: true,
+      noBuildStep: true,
+      noPaidApis: true
+    }
+  };
+}
+
+function extractJsonObject(text = '') {
+  const source = String(text || '');
+  const start = source.indexOf('{');
+  const end = source.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('No JSON object found');
+  }
+  return JSON.parse(source.slice(start, end + 1));
+}
+
+function validateDesignerSpec(spec) {
+  const failures = [];
+  if (!spec || typeof spec !== 'object') {
+    return { ok: false, failures: [createFailure('DESIGN_SCHEMA_INVALID', 'spec is not an object')] };
+  }
+  const requiredStrings = ['title', 'coreLoop', 'winCondition', 'loseCondition'];
+  for (const key of requiredStrings) {
+    if (typeof spec[key] !== 'string' || !spec[key].trim()) {
+      failures.push(createFailure('DESIGN_SCHEMA_INVALID', `${key} missing or empty`));
+    }
+  }
+  if (!Array.isArray(spec.controls) || spec.controls.length < 2) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'controls < 2'));
+  }
+  if (!Array.isArray(spec.mechanics) || spec.mechanics.length < 2) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'mechanics < 2'));
+  }
+  if (!Array.isArray(spec.mustHave) || spec.mustHave.length < 3) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'mustHave < 3'));
+  }
+  if (spec?.constraints?.autoRun !== true || spec?.constraints?.requiresRafLoop !== true) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'constraints.autoRun/requiresRafLoop must be true'));
+  }
+  const joinedInputs = Array.isArray(spec.controls)
+    ? spec.controls.map((c) => String(c?.input || '').toLowerCase()).join(' ')
+    : '';
+  if (!/(wasd|arrow|mouse|touch|pointer)/.test(joinedInputs)) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'controls must include keyboard or pointer input'));
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function buildSingleFileGameHtml({ title = 'Neon Orbit Runner' } = {}) {
+  const safeTitle = sanitizeTitle(title);
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${title.replace(/</g, '&lt;')}</title>
-  <style>html,body{margin:0;height:100%;background:#0b1020;color:#fff;font-family:Inter,system-ui}canvas{display:block;width:100vw;height:100vh}#hud{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}</style>
+  <title>${safeTitle}</title>
+  <style>html,body{margin:0;height:100%;background:#0b1020;color:#fff;font-family:Inter,system-ui}canvas{display:block;width:100vw;height:100vh}#hud{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}#state{position:fixed;right:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}</style>
 </head>
 <body>
   <canvas id="c"></canvas>
-  <div id="hud">WASD / Arrows · Survive and score · R to restart</div>
+  <div id="hud">Score: <span id="score">0</span></div>
+  <div id="state">Running</div>
   <script>
-    const c=document.getElementById('c');const ctx=c.getContext('2d');let w,h;
-    const player={x:100,y:100,r:12,vx:0,vy:0,speed:0.45};const keys={};
-    let enemies=[],score=0,over=false,seed=1337;
+    const c=document.getElementById('c');const ctx=c.getContext('2d');const scoreEl=document.getElementById('score');const stateEl=document.getElementById('state');let w,h;
+    const player={x:100,y:100,r:12,vx:0,vy:0};const keys={};
+    let enemies=[],score=0,gameState='running',seed=1337,spawnMs=900,lastSpawn=0;
     const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
     function resize(){w=c.width=innerWidth;h=c.height=innerHeight;}addEventListener('resize',resize);resize();
-    addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&over)reset();});addEventListener('keyup',e=>keys[e.key]=false);
+    addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&gameState!=='running')reset();});addEventListener('keyup',e=>keys[e.key]=false);
+    function reset(){enemies=[];score=0;gameState='running';player.x=100;player.y=h/2;spawnMs=900;stateEl.textContent='Running';}
     function spawn(){const e={x:w+20,y:20+rand()*(h-40),r:10+rand()*12,s:-2-rand()*3};enemies.push(e);} 
-    function reset(){enemies=[];score=0;over=false;player.x=100;player.y=h/2;}
-    setInterval(()=>!over&&spawn(),900);
-    function step(){
-      if(!over){player.vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);player.vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);player.x=Math.max(player.r,Math.min(w-player.r,player.x+player.vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+player.vy*7));
-        enemies.forEach(e=>{e.x+=e.s; if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r) over=true;}); enemies=enemies.filter(e=>e.x>-40); score+=0.1;}
+    function endGame(kind){gameState=kind;stateEl.textContent=kind==='lost'?'Game Over':'Victory';}
+    function step(ts){
+      if(gameState==='running'){
+        if(ts-lastSpawn>spawnMs){spawn();lastSpawn=ts;spawnMs=Math.max(280,spawnMs-2);} 
+        player.vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);player.vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);
+        player.x=Math.max(player.r,Math.min(w-player.r,player.x+player.vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+player.vy*7));
+        enemies.forEach(e=>{e.x+=e.s; if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r) endGame('lost');});
+        enemies=enemies.filter(e=>e.x>-40); score+=0.12; scoreEl.textContent=String(Math.floor(score)); if(score>=120) endGame('win');
+      }
       ctx.fillStyle='#0b1020';ctx.fillRect(0,0,w,h);ctx.fillStyle='#6ee7ff';ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();
       ctx.fillStyle='#ff5c8a';enemies.forEach(e=>{ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();});
-      ctx.fillStyle='#fff';ctx.font='16px sans-serif';ctx.fillText('Score: '+Math.floor(score),14,h-18);
-      if(over){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText('Game Over · Press R',w/2-120,h/2);} requestAnimationFrame(step);
+      if(gameState!=='running'){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText(gameState==='lost'?'Game Over':'Victory',w/2-90,h/2);}
+      requestAnimationFrame(step);
     }
-    reset();step();
+    reset();requestAnimationFrame(step);
   </script>
 </body>
 </html>`;
+}
+
+function buildDeterministicBuilderOutput(spec, mode = 'single') {
+  if (mode === 'single') {
+    return {
+      mode: 'single',
+      files: [{ path: 'index.html', content: buildSingleFileGameHtml({ title: spec?.title }) }],
+      entry: 'index.html'
+    };
+  }
+
+  const title = sanitizeTitle(spec?.title || 'Game Mode Build');
+  const indexHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>html,body{margin:0;height:100%;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}canvas{display:block;width:100vw;height:100vh}#hud,#state{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}#state{left:auto;right:12px}</style></head><body><canvas id="c"></canvas><div id="hud">Score: <span id="score">0</span></div><div id="state">Running</div><script type="module" src="./src/game.js"></script></body></html>`;
+  const gameJs = `const c=document.getElementById('c');const ctx=c.getContext('2d');const scoreEl=document.getElementById('score');const stateEl=document.getElementById('state');let w,h;const player={x:100,y:100,r:12};const keys={};let enemies=[],score=0,state='running',spawnMs=900,lastSpawn=0,seed=1337;const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};function resize(){w=c.width=innerWidth;h=c.height=innerHeight;}addEventListener('resize',resize);resize();addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&state!=='running')reset();});addEventListener('keyup',e=>keys[e.key]=false);function reset(){enemies=[];score=0;state='running';player.x=100;player.y=h/2;spawnMs=900;stateEl.textContent='Running';}function spawn(){enemies.push({x:w+20,y:20+rand()*(h-40),r:10+rand()*12,s:-2-rand()*3});}function end(kind){state=kind;stateEl.textContent=kind==='lost'?'Game Over':'Victory';}function tick(ts){if(state==='running'){if(ts-lastSpawn>spawnMs){spawn();lastSpawn=ts;spawnMs=Math.max(260,spawnMs-2);}const vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);const vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);player.x=Math.max(player.r,Math.min(w-player.r,player.x+vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+vy*7));for(const e of enemies){e.x+=e.s;if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r){end('lost');}}enemies=enemies.filter(e=>e.x>-40);score+=0.12;scoreEl.textContent=String(Math.floor(score));if(score>=120)end('win');}ctx.fillStyle='#0a0f1e';ctx.fillRect(0,0,w,h);ctx.fillStyle='#56d5ff';ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();ctx.fillStyle='#ff5f8f';for(const e of enemies){ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();}if(state!=='running'){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText(state==='lost'?'Game Over':'Victory',w/2-90,h/2);}requestAnimationFrame(tick);}reset();requestAnimationFrame(tick);`;
+  const readme = `# ${title}\n\nGenerated by Game Mode orchestrator.\n\n## Controls\n- WASD / Arrow keys to move\n- R to restart\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n\`\`\`\n\n## Deploy\nUse GitHub Pages from the repo root.\n`;
+
+  return {
+    mode: 'multi',
+    files: [
+      { path: 'index.html', content: indexHtml },
+      { path: 'src/game.js', content: gameJs },
+      { path: 'README.md', content: readme }
+    ],
+    entry: 'index.html'
+  };
+}
+
+function validateBuilderOutput(output, mode = 'single') {
+  const failures = [];
+  if (!output || typeof output !== 'object') {
+    return { ok: false, failures: [createFailure('BUILD_SCHEMA_INVALID', 'output is not an object')] };
+  }
+  if (!Array.isArray(output.files) || output.files.length === 0) {
+    failures.push(createFailure('BUILD_SCHEMA_INVALID', 'files missing'));
+    return { ok: false, failures };
+  }
+
+  const fileMap = new Map(output.files.map((f) => [String(f.path || ''), String(f.content || '')]));
+  const entry = String(output.entry || '');
+  if (!fileMap.has(entry)) {
+    failures.push(createFailure('BUILD_SCHEMA_INVALID', 'entry file missing'));
+  }
+
+  if (mode === 'single') {
+    const html = fileMap.get('index.html') || fileMap.get(entry) || '';
+    if (!html.toLowerCase().includes('<!doctype html>')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing DOCTYPE'));
+    if (!html.includes('requestAnimationFrame(')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing requestAnimationFrame'));
+    if (!html.includes('Game Over')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Game Over'));
+    if (!html.includes('Victory') && !html.includes('Win')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Victory/Win'));
+    if (!html.includes('Score')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Score'));
+  } else {
+    const indexHtml = fileMap.get('index.html') || '';
+    const readme = fileMap.get('README.md') || '';
+    if (!fileMap.has('index.html')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'missing index.html'));
+    if (!fileMap.has('README.md')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'missing README.md'));
+    if (!(indexHtml.includes('src/game.js') || indexHtml.includes('<script'))) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'index.html missing JS reference'));
+    }
+    const readmeLower = readme.toLowerCase();
+    if (!(readmeLower.includes('github pages') || readmeLower.includes('deploy'))) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'README missing deploy/GitHub Pages guidance'));
+    }
+    if (!readmeLower.includes('controls')) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'README missing controls section'));
+    }
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
+async function callGameModeLlmJson({ system, user, temperature = 0.2 }) {
+  if (!LLM_PROXY_URL) {
+    throw new Error('LLM proxy unavailable');
+  }
+  const workerRes = await fetch(LLM_PROXY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      temperature
+    })
+  });
+  if (!workerRes.ok) {
+    throw new Error(`LLM request failed (${workerRes.status})`);
+  }
+  const text = await workerRes.text();
+  const data = text ? JSON.parse(text) : null;
+  const content = data?.choices?.[0]?.message?.content
+    ?? data?.candidates?.[0]?.content
+    ?? data?.output_text
+    ?? '';
+  return extractJsonObject(content);
+}
+
+async function generateDesignerSpec({ mode, prompt, seedCode }) {
+  if (!GAME_MODE_LLM_ENABLED) {
+    return { spec: buildDeterministicDesignerSpec({ prompt }), usedLlm: false, fallback: false };
+  }
+
+  const seedPreview = String(seedCode || '').slice(0, 2000);
+  const system = 'Return only valid JSON. No markdown. No commentary. You must satisfy: auto-run game, requestAnimationFrame loop, win/lose conditions, no build step.';
+  const user = `Design a shippable static game concept. mode=${mode}. user_prompt=${prompt || 'random concept required'}. seed_code_excerpt=${seedPreview || 'none'}. Output must exactly match schemaVersion 1.0 contract.`;
+
+  try {
+    const spec = await callGameModeLlmJson({ system, user, temperature: 0.2 });
+    const validation = validateDesignerSpec(spec);
+    if (!validation.ok) {
+      return { spec: buildDeterministicDesignerSpec({ prompt }), usedLlm: true, fallback: true, failures: validation.failures };
+    }
+    return { spec, usedLlm: true, fallback: false };
+  } catch (error) {
+    return {
+      spec: buildDeterministicDesignerSpec({ prompt }),
+      usedLlm: true,
+      fallback: true,
+      failures: [createFailure('DESIGN_SCHEMA_INVALID', String(error?.message || error))]
+    };
+  }
+}
+
+async function generateBuilderOutput({ mode, designerSpec, prompt }) {
+  if (!GAME_MODE_LLM_ENABLED) {
+    return { output: buildDeterministicBuilderOutput(designerSpec, mode), usedLlm: false, fallback: false };
+  }
+
+  const system = 'Return only valid JSON in the specified output schema. Must produce playable auto-running game with requestAnimationFrame on load. No external build tooling. Use Canvas 2D. Must display Score and show Game Over and Victory states. No console.error.';
+  const user = `mode=${mode}. designer_spec=${JSON.stringify(designerSpec)}. user_prompt=${prompt || ''}. Runtime verifier requires RAF heartbeat without user click.`;
+
+  try {
+    const output = await callGameModeLlmJson({ system, user, temperature: 0.15 });
+    const validation = validateBuilderOutput(output, mode);
+    if (!validation.ok) {
+      return {
+        output: buildDeterministicBuilderOutput(designerSpec, mode),
+        usedLlm: true,
+        fallback: true,
+        failures: validation.failures
+      };
+    }
+    return { output, usedLlm: true, fallback: false };
+  } catch (error) {
+    return {
+      output: buildDeterministicBuilderOutput(designerSpec, mode),
+      usedLlm: true,
+      fallback: true,
+      failures: [createFailure('BUILD_SCHEMA_INVALID', String(error?.message || error))]
+    };
+  }
 }
 
 async function fileExists(filePath) {
@@ -1274,44 +1517,90 @@ function deterministicRepair(result, verification) {
   return result;
 }
 
-async function buildDeterministicGameOutput(job) {
-  const { mode, payload } = job;
+async function buildDeterministicGameOutput(job, designerSpec) {
+  const mode = job.mode;
+  return buildDeterministicBuilderOutput(designerSpec, mode);
+}
+
+async function writeBuilderOutputToWorkspace(job, builderOutput) {
+  const mode = job.mode;
   if (mode === 'single') {
-    const html = buildSingleFileGameHtml({ prompt: payload.prompt });
     const outputDir = resolveWorkspacePath('game-mode-output');
     await fs.mkdir(outputDir, { recursive: true });
+    const entry = String(builderOutput.entry || 'index.html');
+    const file = builderOutput.files.find((f) => String(f.path) === entry) || builderOutput.files[0];
     const htmlPath = path.join(outputDir, `${job.id}.html`);
-    await fs.writeFile(htmlPath, html, 'utf8');
-    return { mode: 'single', html, htmlPath };
+    await fs.writeFile(htmlPath, String(file?.content || ''), 'utf8');
+    return { mode: 'single', html: String(file?.content || ''), htmlPath };
   }
 
-  const targetDir = resolveWorkspacePath(payload.targetDir || `game-mode/${job.id}`);
-  await fs.mkdir(path.join(targetDir, 'src'), { recursive: true });
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Game Mode Repo</title><style>body{margin:0;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}#app{padding:16px}</style></head><body><div id="app"></div><script type="module" src="./src/game.js"></script></body></html>`;
-  const js = `const app=document.getElementById('app');app.innerHTML='<h1>Game Mode Build</h1><p>Interactive starter produced by orchestrator.</p><p>Use this as your baseline and iterate.</p>';`;
-  const readme = `# Game Mode Build\n\nGenerated by deterministic Game Mode orchestrator.\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n# then open http://localhost:8080/${workspaceRelative(targetDir)}/\n\`\`\`\n\n## Deploy (GitHub Pages)\n\n1. Push this folder to a repo.\n2. In GitHub repo settings, enable Pages from main branch root.\n3. Wait for deployment and open the Pages URL.\n\n## Controls\n\nUpdate \`src/game.js\` with your mechanics and controls.\n`;
+  const targetDir = resolveWorkspacePath(job.payload.targetDir || `game-mode/${job.id}`);
+  await fs.mkdir(targetDir, { recursive: true });
+  for (const file of builderOutput.files) {
+    const rel = String(file.path || '').replace(/^\/+/, '');
+    const abs = path.resolve(targetDir, rel);
+    if (!abs.startsWith(path.resolve(targetDir))) {
+      throw new Error(`Invalid builder path: ${rel}`);
+    }
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    const content = rel === 'index.html'
+      ? injectRuntimeBootstrap(String(file.content || ''))
+      : String(file.content || '');
+    await fs.writeFile(abs, content, 'utf8');
+  }
 
-  await Promise.all([
-    fs.writeFile(path.join(targetDir, 'index.html'), injectRuntimeBootstrap(html), 'utf8'),
-    fs.writeFile(path.join(targetDir, 'src', 'game.js'), js, 'utf8'),
-    fs.writeFile(path.join(targetDir, 'README.md'), readme, 'utf8')
-  ]);
-
+  const readmePath = path.join(targetDir, 'README.md');
   return {
     mode: 'multi',
     rootDir: targetDir,
     repoPath: targetDir,
-    openPath: workspaceRelative(path.join(targetDir, 'README.md'))
+    openPath: workspaceRelative(readmePath)
   };
 }
 
 async function runGameModeJob(job) {
   pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
-  pushGameModeEvent(job, 'log', { text: 'Generating concept and scope lock.' });
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  const stage3Enabled = GAME_MODE_LLM_ENABLED;
+  pushGameModeEvent(job, 'log', { text: `Stage3 autonomy: ${stage3Enabled ? 'enabled' : 'disabled'}` });
+
+  const designer = await generateDesignerSpec({
+    mode: job.mode,
+    prompt: String(job.payload?.prompt || ''),
+    seedCode: job.payload?.seed?.useEditorCode ? String(job.payload?.seed?.editorCode || '') : ''
+  });
+  const designerValidation = validateDesignerSpec(designer.spec);
+  const designerUsed = designer.usedLlm === true;
+  const designerFallback = designer.fallback === true || !designerValidation.ok;
+  if (!designerValidation.ok) {
+    pushGameModeEvent(job, 'log', { text: `Designer invalid: ${designerValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
+  } else {
+    pushGameModeEvent(job, 'log', { text: `Designer ok: title="${designer.spec.title}" genre="${designer.spec.genre || 'unknown'}"` });
+  }
+
+  const effectiveDesignerSpec = designerValidation.ok
+    ? designer.spec
+    : buildDeterministicDesignerSpec({ prompt: job.payload?.prompt });
 
   pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
-  let result = await buildDeterministicGameOutput(job);
+  const builder = await generateBuilderOutput({
+    mode: job.mode,
+    designerSpec: effectiveDesignerSpec,
+    prompt: String(job.payload?.prompt || '')
+  });
+  const builderValidation = validateBuilderOutput(builder.output, job.mode);
+  const builderUsed = builder.usedLlm === true;
+  const builderFallback = builder.fallback === true || !builderValidation.ok;
+  if (!builderValidation.ok) {
+    pushGameModeEvent(job, 'log', { text: `Builder invalid: ${builderValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
+  } else {
+    pushGameModeEvent(job, 'log', { text: `Builder ok: files=${builder.output.files.map((f) => f.path).join(', ')}` });
+  }
+
+  const effectiveBuilderOutput = builderValidation.ok
+    ? builder.output
+    : await buildDeterministicGameOutput(job, effectiveDesignerSpec);
+
+  let result = await writeBuilderOutputToWorkspace(job, effectiveBuilderOutput);
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'running' });
   for (let pass = 0; pass <= MAX_FIX_PASSES; pass += 1) {
@@ -1343,7 +1632,9 @@ async function runGameModeJob(job) {
       return;
     }
 
-    pushGameModeEvent(job, 'log', { text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')}` });
+    pushGameModeEvent(job, 'log', {
+      text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')} | stage3Enabled=${stage3Enabled} designerUsed=${designerUsed} designerFallback=${designerFallback} builderUsed=${builderUsed} builderFallback=${builderFallback}`
+    });
     result = deterministicRepair(result, verification);
     if (result.mode === 'single' && result.htmlPath) {
       await fs.writeFile(result.htmlPath, result.html, 'utf8');
@@ -1362,6 +1653,9 @@ async function runGameModeJob(job) {
   }
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'completed' });
+  pushGameModeEvent(job, 'log', {
+    text: `Telemetry: stage3Enabled=${stage3Enabled} designerUsed=${designerUsed} designerFallback=${designerFallback} builderUsed=${builderUsed} builderFallback=${builderFallback}`
+  });
   finalizeGameModeJob(job, {
     status: 'success',
     donePayload: {
