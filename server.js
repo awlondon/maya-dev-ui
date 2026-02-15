@@ -1887,6 +1887,12 @@ app.get('/api/dev/perf', (_req, res) => {
   });
 });
 
+function createAgentRouter() {
+  const router = express.Router();
+  router.use((_req, res) => res.status(501).json({ ok: false, error: 'Agent routes unavailable in local soak mode' }));
+  return router;
+}
+
 app.use('/agent', createAgentRouter({
   getSessionFromRequest,
   verifyStripeSignature
