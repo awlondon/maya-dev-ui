@@ -1298,58 +1298,66 @@ const PREVIEW_BRIDGE_VERSION = '2.2';
 const SESSION_BRIDGE_SCRIPT = `${SESSION_BRIDGE_MARKER}
 <script id="dev-session-bridge">
 
-  window.__SESSION__ = window.__SESSION__ || null;
-  const PREVIEW_BRIDGE_VERSION = '${PREVIEW_BRIDGE_VERSION}';
-  const postPreviewReady = () => {
-    if (!window.parent) {
-      return;
-    }
-    try {
-      window.parent.postMessage({
-        type: 'READY',
-        channel: 'maya-preview',
-        version: PREVIEW_BRIDGE_VERSION,
-        route: window.location.pathname || '/',
-        href: window.location.href,
-        timestamp: Date.now()
-      }, '*');
-    } catch (err) {
-      console.warn('postMessage blocked by COOP');
-    }
-  };
-  window.addEventListener('message', (event) => {
-    if (event.data?.type === 'SESSION') {
-      window.__SESSION__ = event.data;
-    }
-    if (event.data?.type === 'PING' && event.data?.channel === 'maya-preview') {
-      postPreviewReady();
-    }
-  });
-  postPreviewReady();
-  const notifyError = (payload) => {
-    if (window.parent) {
+  (() => {
+    window.__SESSION__ = window.__SESSION__ || null;
+    const bridgeVersion = '${PREVIEW_BRIDGE_VERSION}';
+    const postPreviewReady = () => {
+      if (!window.parent) {
+        return;
+      }
       try {
-        window.parent.postMessage({ type: 'SANDBOX_ERROR', error: payload }, '*');
+        window.parent.postMessage({
+          type: 'READY',
+          channel: 'maya-preview',
+          version: bridgeVersion,
+          route: window.location.pathname || '/',
+          href: window.location.href,
+          timestamp: Date.now()
+        }, '*');
       } catch (err) {
         console.warn('postMessage blocked by COOP');
       }
-    }
-  };
-  window.addEventListener('error', (event) => {
-    notifyError({
-      message: event.message,
-      line: event.lineno,
-      column: event.colno,
-      stack: event.error?.stack || ''
+    };
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'SESSION') {
+        window.__SESSION__ = event.data;
+      }
+      if (event.data?.type === 'PING' && event.data?.channel === 'maya-preview') {
+        postPreviewReady();
+      }
     });
-  });
-  window.addEventListener('unhandledrejection', (event) => {
-    const reason = event.reason;
-    notifyError({
-      message: reason?.message || String(reason || 'Unhandled rejection'),
-      stack: reason?.stack || ''
+
+    window.addEventListener('load', () => postPreviewReady(), { once: true });
+    postPreviewReady();
+
+    const notifyError = (payload) => {
+      if (window.parent) {
+        try {
+          window.parent.postMessage({ type: 'SANDBOX_ERROR', error: payload }, '*');
+        } catch (err) {
+          console.warn('postMessage blocked by COOP');
+        }
+      }
+    };
+
+    window.addEventListener('error', (event) => {
+      notifyError({
+        message: event.message,
+        line: event.lineno,
+        column: event.colno,
+        stack: event.error?.stack || ''
+      });
     });
-  });
+
+    window.addEventListener('unhandledrejection', (event) => {
+      const reason = event.reason;
+      notifyError({
+        message: reason?.message || String(reason || 'Unhandled rejection'),
+        stack: reason?.stack || ''
+      });
+    });
+  })();
 </script>`;
 
 function injectSessionBridge(code) {
