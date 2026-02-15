@@ -31,12 +31,12 @@ if (!window.GOOGLE_CLIENT_ID) {
 function resolveApiBase() {
   const apiBase =
     window.API_BASE ||
-    (window.location.hostname === 'localhost'
-      ? 'http://localhost:8080'
+    (window.location.hostname === "localhost"
+      ? "http://localhost:8080"
       : null);
 
-  if (!apiBase && window.location.hostname !== 'localhost') {
-    throw new Error('Missing API base URL in production.');
+  if (!apiBase && window.location.hostname !== "localhost") {
+    throw new Error("Missing API base URL in production.");
   }
 
   return apiBase;
