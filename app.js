@@ -722,9 +722,10 @@ function ensurePlayableButtonPresence() {
 
   playableButton.className = 'playable-btn';
   playableButton.type = 'button';
-  playableButton.disabled = false;
-  playableButton.title = 'Make it a game';
-  playableButton.setAttribute('aria-label', 'Make it a game');
+  // Frontend-only safeguard: keep game mode disabled until /api/run is available.
+  playableButton.disabled = true;
+  playableButton.title = 'Game mode temporarily disabled';
+  playableButton.setAttribute('aria-label', 'Game mode temporarily disabled');
   playableButton.hidden = false;
   playableButton.style.display = 'inline-flex';
   playableButton.style.visibility = 'visible';
@@ -775,17 +776,7 @@ function initComposerControls() {
   if (playableBtn && playableBtn.dataset.composerBound !== 'true') {
     playableBtn.dataset.composerBound = 'true';
     playableBtn.addEventListener('click', async () => {
-      const activeAgent = appMachine.getActiveAgent();
-      const activeAgentBusy = [AGENT_ROOT_STATES.PREPARING, AGENT_ROOT_STATES.ACTIVE].includes(activeAgent?.root);
-      if (activeAgentBusy || isGenerating || chatState.locked) {
-        return;
-      }
-
-      try {
-        await startAgentExecution();
-      } catch (error) {
-        console.warn('Game mode execution failed.', error);
-      }
+      showToast('Game mode is temporarily disabled while /api/run is not available.', { variant: 'warning' });
     });
   }
 
@@ -4137,7 +4128,6 @@ async function bootApp() {
   await initAgentSimulationHarness();
   ensureAgentsWorkspaceMounted();
   mountAgentSidePanel();
-  mountAgentToggleButton();
 
   appMachine.dispatch(EVENTS.START);
 
