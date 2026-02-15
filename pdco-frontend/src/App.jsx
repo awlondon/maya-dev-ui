@@ -13,6 +13,7 @@ import { API_BASE, requireApiBase } from './config/runtime';
 const isDev = import.meta.env.DEV;
 const layoutStorageKey = 'pdco.devstudio.layout.v1';
 const rightPanelOpenStorageKey = 'pdco.devstudio.rightPanelOpen.v1';
+const rightPanelWidthStorageKey = 'pdco.devstudio.rightPanelWidth.v1';
 
 const panelDefinitions = {
   editor: { title: 'Editor', zone: 'center', allowUndock: false },
@@ -69,6 +70,19 @@ function readStoredRightPanelOpen() {
   }
 
   return window.localStorage.getItem(rightPanelOpenStorageKey) === 'true';
+}
+
+function readStoredRightPanelWidth() {
+  if (typeof window === 'undefined') {
+    return 380;
+  }
+
+  const storedWidth = Number.parseInt(window.localStorage.getItem(rightPanelWidthStorageKey) || '', 10);
+  if (Number.isNaN(storedWidth)) {
+    return 380;
+  }
+
+  return Math.min(800, Math.max(280, storedWidth));
 }
 
 function useRenderCounter(name) {
@@ -373,9 +387,9 @@ function App() {
   const [backendStatus, setBackendStatus] = useState('CHECKING');
   const [editorValue, setEditorValue] = useState('<h1>PDCo Dev Studio</h1>');
   const [isRightPanelOpen, setRightPanelOpen] = useState(() => readStoredRightPanelOpen());
-  const studioRef = useRef(null);
+  const [rightPanelWidth, setRightPanelWidth] = useState(() => readStoredRightPanelWidth());
   const shellRef = useRef(null);
-  const dragRef = useRef({ active: false, side: null, value: 0 });
+  const dragRef = useRef({ active: false, value: 0 });
 
   const hasLeftPanel = layout.panels.files.visible && layout.panels.files.docked;
   const hasRightPanel = ['preview', 'tasks', 'settings'].some((id) => layout.panels[id].visible && layout.panels[id].docked);
@@ -396,6 +410,10 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(rightPanelOpenStorageKey, String(isRightPanelOpen));
   }, [isRightPanelOpen]);
+
+  useEffect(() => {
+    window.localStorage.setItem(rightPanelWidthStorageKey, String(rightPanelWidth));
+  }, [rightPanelWidth]);
 
   const onEditorChange = useCallback((event) => {
     setEditorValue(event.target.value);
@@ -444,13 +462,36 @@ function App() {
   }, [layout]);
 
   const onDividerStart = useCallback((side) => (event) => {
+    if (side !== 'left') {
+      return;
+    }
     dragRef.current = {
       active: true,
-      side,
-      value: side === 'left' ? layout.left : layout.right
+      value: layout.left
     };
     event.preventDefault();
-  }, [layout.left, layout.right]);
+  }, [layout.left]);
+
+  const startRightPanelResize = useCallback((event) => {
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const startWidth = rightPanelWidth;
+
+    const onMove = (moveEvent) => {
+      const delta = startX - moveEvent.clientX;
+      const nextWidth = Math.min(Math.max(startWidth + delta, 280), 800);
+      setRightPanelWidth(nextWidth);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [rightPanelWidth]);
 
   useEffect(() => {
     const onMove = (event) => {
@@ -462,28 +503,18 @@ function App() {
       const minPanelWidth = 180;
       const maxPanelWidth = 420;
 
-      if (dragRef.current.side === 'left') {
-        const next = Math.min(maxPanelWidth, Math.max(minPanelWidth, event.clientX - shellRect.left));
-        dragRef.current.value = next;
-        shellRef.current.style.setProperty('--left-width', `${next}px`);
-      }
-
-      if (dragRef.current.side === 'right') {
-        const rightBounds = studioRef.current?.getBoundingClientRect() || shellRect;
-        const fromRight = rightBounds.right - event.clientX;
-        const next = Math.min(maxPanelWidth, Math.max(minPanelWidth, fromRight));
-        dragRef.current.value = next;
-        studioRef.current?.style.setProperty('--right-panel-width', `${next}px`);
-      }
+      const next = Math.min(maxPanelWidth, Math.max(minPanelWidth, event.clientX - shellRect.left));
+      dragRef.current.value = next;
+      shellRef.current.style.setProperty('--left-width', `${next}px`);
     };
 
     const onUp = () => {
       if (!dragRef.current.active) {
         return;
       }
-      const { side, value } = dragRef.current;
-      dragRef.current = { active: false, side: null, value: 0 };
-      setLayout((current) => ({ ...current, ...(side === 'left' ? { left: value } : { right: value }) }));
+      const { value } = dragRef.current;
+      dragRef.current = { active: false, value: 0 };
+      setLayout((current) => ({ ...current, left: value }));
     };
 
     window.addEventListener('mousemove', onMove);
@@ -567,7 +598,7 @@ function App() {
       </div>
 
       <div className="workspace-main">
-        <div className="workspace-studio" ref={studioRef} style={{ '--right-panel-width': `${layout.right}px` }}>
+        <div className="workspace-studio">
           <main className="workspace-shell" ref={shellRef} style={shellStyle}>
             <div className="left-column">
               <FilesPanel panelLayout={layout.panels.files} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} editorValue={editorValue} />
@@ -587,12 +618,16 @@ function App() {
                 onClick={() => setRightPanelOpen((open) => !open)}
                 aria-expanded={isRightPanelOpen}
                 aria-label={isRightPanelOpen ? 'Collapse right panel' : 'Expand right panel'}
+                style={{ right: isRightPanelOpen ? `${rightPanelWidth + 8}px` : '8px' }}
               >
-                {isRightPanelOpen ? '⟩' : '⟨'}
+                {isRightPanelOpen ? '→' : '←'}
               </button>
 
-              <aside className={`right-overlay-panel ${isRightPanelOpen ? 'right-overlay-panel-open' : ''}`}>
-                <div className="right-overlay-resize-handle" onMouseDown={onDividerStart('right')} />
+              <aside
+                className={`right-overlay-panel ${isRightPanelOpen ? 'right-overlay-panel-open' : ''}`}
+                style={{ width: `${rightPanelWidth}px`, transform: isRightPanelOpen ? 'translateX(0)' : `translateX(${rightPanelWidth}px)` }}
+              >
+                <div className="right-overlay-resize-handle" onMouseDown={startRightPanelResize} />
                 <section className="right-column">
                   <PreviewPanel panelLayout={layout.panels.preview} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />
                   <TasksPanel panelLayout={layout.panels.tasks} onToggleVisible={togglePanelVisible} onToggleDock={togglePanelDock} />

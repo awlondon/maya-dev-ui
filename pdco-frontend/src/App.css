@@ -93,7 +93,6 @@ body {
   flex: 1;
   min-width: 0;
   position: relative;
-  --right-panel-width: 360px;
 }
 
 .workspace-shell {
@@ -135,28 +134,32 @@ body {
 }
 
 .right-overlay-panel {
-  position: absolute;
+  position: fixed;
+  display: flex;
+  flex-direction: column;
   top: 0;
   right: 0;
-  width: var(--right-panel-width);
   height: 100%;
-  background: #0f1322;
-  border-left: 1px solid #242b46;
-  transform: translateX(100%);
+  background: #111;
+  box-shadow: 0 0 20px rgb(0 0 0 / 40%);
   transition: transform 200ms ease;
-  z-index: 20;
+  z-index: 40;
+  pointer-events: none;
 }
 
 .right-overlay-panel-open {
-  transform: translateX(0);
+  pointer-events: auto;
 }
 
 .right-panel-toggle {
-  position: absolute;
-  top: 8px;
-  right: 0;
-  z-index: 30;
-  border-radius: 6px 0 0 6px;
+  position: fixed;
+  top: 12px;
+  z-index: 50;
+  border: 1px solid #333;
+  background: #222;
+  color: #fff;
+  cursor: pointer;
+  transition: right 200ms ease;
   padding: 6px 10px;
 }
 
@@ -164,10 +167,10 @@ body {
   position: absolute;
   top: 0;
   left: 0;
-  width: 8px;
+  width: 6px;
   height: 100%;
-  cursor: col-resize;
-  background: #222948;
+  cursor: ew-resize;
+  background: transparent;
 }
 
 .center-column {
