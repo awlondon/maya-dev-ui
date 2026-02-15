@@ -1179,6 +1179,10 @@ function validateBuilderOutput(output, mode = 'single') {
 
 async function callGameModeLlmJson({ system, user, temperature = 0.2, label = 'LLM' }) {
   const useDirect = process.env.GAME_MODE_DIRECT_LLM === '1';
+  const directKeyPresent = Boolean(OPENAI_API_KEY);
+  if (process.env.GAME_MODE_DEBUG_LLM === '1' || process.env.GAME_MODE_DEBUG_LLM_FULL === '1') {
+    console.log(`[LLM_DIRECT_PREFLIGHT] label=${label} directEnabled=${useDirect ? 1 : 0} keyPresent=${directKeyPresent ? 1 : 0}`);
+  }
   const maxTokens = label === 'BUILDER' ? 6000 : 1200;
 
   const controller = new AbortController();
@@ -1669,7 +1673,9 @@ async function writeBuilderOutputToWorkspace(job, builderOutput) {
 async function runGameModeJob(job) {
   const stage3Enabled = GAME_MODE_LLM_ENABLED;
   const runtimeEnabled = GAME_MODE_RUNTIME_VERIFY_ENABLED;
-  const llmTransport = process.env.GAME_MODE_DIRECT_LLM === '1' ? 'direct' : 'proxy';
+  const directEnabled = process.env.GAME_MODE_DIRECT_LLM === '1';
+  const directKeyPresent = Boolean(OPENAI_API_KEY);
+  const llmTransport = directEnabled ? 'direct' : 'proxy';
   const startedAt = Date.now();
 
   const summary = {
@@ -1677,6 +1683,8 @@ async function runGameModeJob(job) {
     mode: job.mode,
     stage3Enabled,
     llmTransport,
+    directEnabled,
+    directKeyPresent,
     designerUsed: false,
     designerFallback: false,
     designerFallbackReason: null,
