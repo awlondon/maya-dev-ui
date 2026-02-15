@@ -1014,9 +1014,16 @@ function extractJsonObject(text = '') {
   const start = source.indexOf('{');
   const end = source.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) {
-    throw new Error('No JSON object found');
+    const error = new Error('No JSON object found');
+    error.code = 'JSON_PARSE_FAIL';
+    throw error;
   }
-  return JSON.parse(source.slice(start, end + 1));
+  try {
+    return JSON.parse(source.slice(start, end + 1));
+  } catch (parseError) {
+    parseError.code = 'JSON_PARSE_FAIL';
+    throw parseError;
+  }
 }
 
 function validateDesignerSpec(spec) {
@@ -1192,7 +1199,13 @@ async function callGameModeLlmJson({ system, user, temperature = 0.2 }) {
 
 async function generateDesignerSpec({ mode, prompt, seedCode }) {
   if (!GAME_MODE_LLM_ENABLED) {
-    return { spec: buildDeterministicDesignerSpec({ prompt }), usedLlm: false, fallback: false };
+    return {
+      spec: buildDeterministicDesignerSpec({ prompt }),
+      usedLlm: false,
+      fallback: false,
+      fallbackReason: null,
+      failures: []
+    };
   }
 
   const seedPreview = String(seedCode || '').slice(0, 2000);
@@ -1203,22 +1216,36 @@ async function generateDesignerSpec({ mode, prompt, seedCode }) {
     const spec = await callGameModeLlmJson({ system, user, temperature: 0.2 });
     const validation = validateDesignerSpec(spec);
     if (!validation.ok) {
-      return { spec: buildDeterministicDesignerSpec({ prompt }), usedLlm: true, fallback: true, failures: validation.failures };
+      return {
+        spec: buildDeterministicDesignerSpec({ prompt }),
+        usedLlm: true,
+        fallback: true,
+        fallbackReason: 'DESIGN_SCHEMA_INVALID',
+        failures: validation.failures
+      };
     }
-    return { spec, usedLlm: true, fallback: false };
+    return { spec, usedLlm: true, fallback: false, fallbackReason: null, failures: [] };
   } catch (error) {
+    const reason = error?.code === 'JSON_PARSE_FAIL' ? 'DESIGN_JSON_PARSE_FAIL' : 'DESIGN_SCHEMA_INVALID';
     return {
       spec: buildDeterministicDesignerSpec({ prompt }),
       usedLlm: true,
       fallback: true,
-      failures: [createFailure('DESIGN_SCHEMA_INVALID', String(error?.message || error))]
+      fallbackReason: reason,
+      failures: [createFailure(reason, String(error?.message || error))]
     };
   }
 }
 
 async function generateBuilderOutput({ mode, designerSpec, prompt }) {
   if (!GAME_MODE_LLM_ENABLED) {
-    return { output: buildDeterministicBuilderOutput(designerSpec, mode), usedLlm: false, fallback: false };
+    return {
+      output: buildDeterministicBuilderOutput(designerSpec, mode),
+      usedLlm: false,
+      fallback: false,
+      fallbackReason: null,
+      failures: []
+    };
   }
 
   const system = 'Return only valid JSON in the specified output schema. Must produce playable auto-running game with requestAnimationFrame on load. No external build tooling. Use Canvas 2D. Must display Score and show Game Over and Victory states. No console.error.';
@@ -1232,16 +1259,19 @@ async function generateBuilderOutput({ mode, designerSpec, prompt }) {
         output: buildDeterministicBuilderOutput(designerSpec, mode),
         usedLlm: true,
         fallback: true,
+        fallbackReason: 'BUILD_SCHEMA_INVALID',
         failures: validation.failures
       };
     }
-    return { output, usedLlm: true, fallback: false };
+    return { output, usedLlm: true, fallback: false, fallbackReason: null, failures: [] };
   } catch (error) {
+    const reason = error?.code === 'JSON_PARSE_FAIL' ? 'BUILD_JSON_PARSE_FAIL' : 'BUILD_SCHEMA_INVALID';
     return {
       output: buildDeterministicBuilderOutput(designerSpec, mode),
       usedLlm: true,
       fallback: true,
-      failures: [createFailure('BUILD_SCHEMA_INVALID', String(error?.message || error))]
+      fallbackReason: reason,
+      failures: [createFailure(reason, String(error?.message || error))]
     };
   }
 }
@@ -1559,38 +1589,99 @@ async function writeBuilderOutputToWorkspace(job, builderOutput) {
 }
 
 async function runGameModeJob(job) {
-  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
   const stage3Enabled = GAME_MODE_LLM_ENABLED;
+  const runtimeEnabled = GAME_MODE_RUNTIME_VERIFY_ENABLED;
+  const startedAt = Date.now();
+
+  const summary = {
+    jobId: job.id,
+    mode: job.mode,
+    stage3Enabled,
+    designerUsed: false,
+    designerFallback: false,
+    designerFallbackReason: null,
+    builderUsed: false,
+    builderFallback: false,
+    builderFallbackReason: null,
+    staticPass: false,
+    runtimeEnabled,
+    runtimePass: runtimeEnabled ? null : null,
+    runtimeFailures: [],
+    fixPasses: 0,
+    repairReasons: [],
+    totalDurationMs: 0,
+    timestamps: {
+      startedAt: job.createdAt || startedAt,
+      completedAt: null
+    },
+    timing: {
+      conceptMs: 0,
+      buildMs: 0,
+      staticVerifyMs: 0,
+      runtimeVerifyMs: 0
+    },
+    contentMetrics: {
+      titleHash: null,
+      fileSizeBytes: 0,
+      jsSizeBytes: 0
+    }
+  };
+
+  const emitSummary = () => {
+    summary.totalDurationMs = Date.now() - startedAt;
+    summary.timestamps.completedAt = job.completedAt || Date.now();
+    console.log('[GAME_MODE_SUMMARY]', JSON.stringify(summary));
+  };
+
+  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
   pushGameModeEvent(job, 'log', { text: `Stage3 autonomy: ${stage3Enabled ? 'enabled' : 'disabled'}` });
 
+  const conceptStart = Date.now();
   const designer = await generateDesignerSpec({
     mode: job.mode,
     prompt: String(job.payload?.prompt || ''),
     seedCode: job.payload?.seed?.useEditorCode ? String(job.payload?.seed?.editorCode || '') : ''
   });
-  const designerValidation = validateDesignerSpec(designer.spec);
-  const designerUsed = designer.usedLlm === true;
-  const designerFallback = designer.fallback === true || !designerValidation.ok;
-  if (!designerValidation.ok) {
-    pushGameModeEvent(job, 'log', { text: `Designer invalid: ${designerValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
-  } else {
-    pushGameModeEvent(job, 'log', { text: `Designer ok: title="${designer.spec.title}" genre="${designer.spec.genre || 'unknown'}"` });
-  }
+  summary.timing.conceptMs = Date.now() - conceptStart;
+  summary.designerUsed = designer.usedLlm === true;
+  summary.designerFallback = designer.fallback === true;
+  summary.designerFallbackReason = designer.fallbackReason || null;
 
+  const designerValidation = validateDesignerSpec(designer.spec);
   const effectiveDesignerSpec = designerValidation.ok
     ? designer.spec
     : buildDeterministicDesignerSpec({ prompt: job.payload?.prompt });
 
+  summary.contentMetrics.titleHash = crypto
+    .createHash('sha1')
+    .update(String(effectiveDesignerSpec?.title || ''))
+    .digest('hex')
+    .slice(0, 12);
+
+  if (!designerValidation.ok) {
+    summary.designerFallback = true;
+    summary.designerFallbackReason = summary.designerFallbackReason || 'DESIGN_SCHEMA_INVALID';
+    pushGameModeEvent(job, 'log', { text: `Designer invalid: ${designerValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
+  } else {
+    pushGameModeEvent(job, 'log', { text: `Designer ok: title="${effectiveDesignerSpec.title}" genre="${effectiveDesignerSpec.genre || 'unknown'}"` });
+  }
+
   pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
+  const buildStart = Date.now();
   const builder = await generateBuilderOutput({
     mode: job.mode,
     designerSpec: effectiveDesignerSpec,
     prompt: String(job.payload?.prompt || '')
   });
+  summary.timing.buildMs = Date.now() - buildStart;
+  summary.builderUsed = builder.usedLlm === true;
+  summary.builderFallback = builder.fallback === true;
+  summary.builderFallbackReason = builder.fallbackReason || null;
+
   const builderValidation = validateBuilderOutput(builder.output, job.mode);
-  const builderUsed = builder.usedLlm === true;
-  const builderFallback = builder.fallback === true || !builderValidation.ok;
   if (!builderValidation.ok) {
+    summary.builderFallback = true;
+    summary.builderFallbackReason = summary.builderFallbackReason || 'BUILD_SCHEMA_INVALID';
     pushGameModeEvent(job, 'log', { text: `Builder invalid: ${builderValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
   } else {
     pushGameModeEvent(job, 'log', { text: `Builder ok: files=${builder.output.files.map((f) => f.path).join(', ')}` });
@@ -1600,23 +1691,45 @@ async function runGameModeJob(job) {
     ? builder.output
     : await buildDeterministicGameOutput(job, effectiveDesignerSpec);
 
+  summary.contentMetrics.fileSizeBytes = Array.isArray(effectiveBuilderOutput?.files)
+    ? effectiveBuilderOutput.files.reduce((acc, file) => acc + Buffer.byteLength(String(file?.content || ''), 'utf8'), 0)
+    : 0;
+  summary.contentMetrics.jsSizeBytes = Array.isArray(effectiveBuilderOutput?.files)
+    ? effectiveBuilderOutput.files
+      .filter((file) => String(file?.path || '').toLowerCase().endsWith('.js'))
+      .reduce((acc, file) => acc + Buffer.byteLength(String(file?.content || ''), 'utf8'), 0)
+    : 0;
+
   let result = await writeBuilderOutputToWorkspace(job, effectiveBuilderOutput);
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'running' });
   for (let pass = 0; pass <= MAX_FIX_PASSES; pass += 1) {
+    const staticStart = Date.now();
     const staticVerification = result.mode === 'single'
       ? await verifySingleFile(result.html)
       : await verifyMultiFile(result.rootDir);
+    summary.timing.staticVerifyMs += Date.now() - staticStart;
+    summary.staticPass = staticVerification.passed;
 
     let verification = staticVerification;
     if (staticVerification.passed) {
+      const runtimeStart = Date.now();
       const runtimeVerification = await verifyRuntimeResult(result);
+      summary.timing.runtimeVerifyMs += Date.now() - runtimeStart;
+
       if (runtimeVerification.skipped) {
+        if (runtimeEnabled) {
+          summary.runtimeFailures = [runtimeVerification.downgrade.code];
+        }
         pushGameModeEvent(job, 'log', { text: `Runtime verify downgrade: ${runtimeVerification.downgrade.code}: ${runtimeVerification.downgrade.detail}` });
       } else if (!runtimeVerification.passed) {
         verification = runtimeVerification;
-        pushGameModeEvent(job, 'log', { text: `Runtime verify failed: ${runtimeVerification.failures.map((f) => f.code).join(', ')}` });
+        summary.runtimePass = false;
+        summary.runtimeFailures = runtimeVerification.failures.map((f) => f.code);
+        pushGameModeEvent(job, 'log', { text: `Runtime verify failed: ${summary.runtimeFailures.join(', ')}` });
       } else {
+        summary.runtimePass = true;
+        summary.runtimeFailures = [];
         const m = runtimeVerification.metrics || {};
         pushGameModeEvent(job, 'log', { text: `Runtime verify ok: rafTicks=${m.rafTicks || 0}, consoleErrors=${m.consoleErrors || 0}, errors=${m.errors || 0}, rejections=${m.rejections || 0}, ms=${m.ms || 0}` });
       }
@@ -1629,16 +1742,26 @@ async function runGameModeJob(job) {
     if (pass === MAX_FIX_PASSES) {
       pushGameModeEvent(job, 'error', { message: 'Verification failed', failures: verification.failures });
       finalizeGameModeJob(job, { status: 'error', donePayload: { status: 'error', failures: verification.failures } });
+      emitSummary();
       return;
     }
 
+    summary.fixPasses += 1;
+    summary.repairReasons.push({
+      pass: pass + 1,
+      failures: verification.failures.map((f) => f.code)
+    });
     pushGameModeEvent(job, 'log', {
-      text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')} | stage3Enabled=${stage3Enabled} designerUsed=${designerUsed} designerFallback=${designerFallback} builderUsed=${builderUsed} builderFallback=${builderFallback}`
+      text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')} | stage3Enabled=${stage3Enabled} designerUsed=${summary.designerUsed} designerFallback=${summary.designerFallback} builderUsed=${summary.builderUsed} builderFallback=${summary.builderFallback}`
     });
     result = deterministicRepair(result, verification);
     if (result.mode === 'single' && result.htmlPath) {
       await fs.writeFile(result.htmlPath, result.html, 'utf8');
     }
+  }
+
+  if (runtimeEnabled && summary.runtimePass === null && summary.runtimeFailures.length === 0) {
+    summary.runtimeFailures = ['RUNTIME_UNAVAILABLE'];
   }
 
   if (result.mode === 'single') {
@@ -1653,9 +1776,6 @@ async function runGameModeJob(job) {
   }
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'completed' });
-  pushGameModeEvent(job, 'log', {
-    text: `Telemetry: stage3Enabled=${stage3Enabled} designerUsed=${designerUsed} designerFallback=${designerFallback} builderUsed=${builderUsed} builderFallback=${builderFallback}`
-  });
   finalizeGameModeJob(job, {
     status: 'success',
     donePayload: {
@@ -1665,6 +1785,7 @@ async function runGameModeJob(job) {
         : { type: 'readme', path: job.result.openPath }
     }
   });
+  emitSummary();
 }
 
 app.get('/api/workspace/list', async (req, res) => {
