@@ -826,6 +826,10 @@ const GAME_MODE_WORKSPACE_ROOT = path.resolve(process.env.OPENCLAW_WORKSPACE_ROO
 const JOB_TTL_MS = 30 * 60 * 1000;
 const JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_FIX_PASSES = 2;
+const GAME_MODE_RUNTIME_VERIFY_ENABLED = process.env.GAME_MODE_RUNTIME_VERIFY === '1';
+const LOAD_TIMEOUT_MS = 4000;
+const HEARTBEAT_TIMEOUT_MS = 1500;
+const POLL_INTERVAL_MS = 100;
 const ARTIFACT_ROLES = {
   ENTRY: 'entry',
   MAIN_HTML: 'main-html',
@@ -1008,13 +1012,17 @@ async function fileExists(filePath) {
   }
 }
 
+function createFailure(code, detail) {
+  return { code, detail };
+}
+
 async function verifySingleFile(htmlString) {
   const failures = [];
   const html = String(htmlString || '').toLowerCase();
-  if (!html.includes('<!doctype html>')) failures.push('Missing DOCTYPE');
-  if (!html.includes('<script')) failures.push('No script tag found (no gameplay logic)');
-  if (!html.includes('<canvas') && !html.includes('requestanimationframe')) failures.push('No rendering loop detected');
-  if (!html.includes('function') && !html.includes('=>')) failures.push('No executable logic found');
+  if (!html.includes('<!doctype html>')) failures.push(createFailure('STATIC_MISSING_DOCTYPE', 'Missing DOCTYPE'));
+  if (!html.includes('<script')) failures.push(createFailure('STATIC_NO_SCRIPT', 'No script tag found (no gameplay logic)'));
+  if (!html.includes('<canvas') && !html.includes('requestanimationframe')) failures.push(createFailure('STATIC_NO_RENDER_LOOP', 'No rendering loop detected'));
+  if (!html.includes('function') && !html.includes('=>')) failures.push(createFailure('STATIC_NO_EXECUTABLE_LOGIC', 'No executable logic found'));
   return { passed: failures.length === 0, failures };
 }
 
@@ -1024,31 +1032,241 @@ async function verifyMultiFile(rootDir) {
   const readmePath = path.join(rootDir, 'README.md');
 
   if (!await fileExists(indexPath)) {
-    failures.push('Missing index.html');
+    failures.push(createFailure('STATIC_MISSING_INDEX_HTML', 'Missing index.html'));
   }
   if (!await fileExists(readmePath)) {
-    failures.push('Missing README.md');
+    failures.push(createFailure('STATIC_MISSING_README', 'Missing README.md'));
   }
   if (await fileExists(indexPath)) {
     const html = await fs.readFile(indexPath, 'utf8');
     if (!String(html || '').includes('<script')) {
-      failures.push('index.html contains no script tag');
+      failures.push(createFailure('STATIC_NO_SCRIPT', 'index.html contains no script tag'));
     }
   }
   return { passed: failures.length === 0, failures };
 }
 
+function injectRuntimeBootstrap(html) {
+  const script = `<script>(function(){var S=window.__GM_STATUS__={startedAt:Date.now(),rafTicks:0,lastRafAt:0,errors:[],rejections:[],consoleErrors:[]};var oRaf=window.requestAnimationFrame?window.requestAnimationFrame.bind(window):null;if(oRaf){window.requestAnimationFrame=function(cb){return oRaf(function(ts){S.rafTicks+=1;S.lastRafAt=Date.now();try{return cb(ts);}catch(e){S.errors.push(String(e&&e.message||e));throw e;}});};}window.addEventListener('error',function(e){S.errors.push(String((e&&e.message)||e));});window.addEventListener('unhandledrejection',function(e){var r=e&&e.reason;S.rejections.push(String(r&&r.message||r||'unhandledrejection'));});var oErr=console.error?console.error.bind(console):null;console.error=function(){try{S.consoleErrors.push(Array.prototype.slice.call(arguments).map(function(v){return typeof v==='string'?v:JSON.stringify(v);}).join(' '));}catch(_){S.consoleErrors.push('console.error');}if(oErr)return oErr.apply(console,arguments);};})();</script>`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => `${m}${script}`);
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${script}</head>`);
+  }
+  return `${script}${html}`;
+}
+
+async function loadPlaywrightChromium() {
+  try {
+    const mod = await import('playwright');
+    if (mod?.chromium) return mod.chromium;
+  } catch {}
+  try {
+    const mod = await import('@playwright/test');
+    if (mod?.chromium) return mod.chromium;
+  } catch {}
+  throw new Error('No chromium launcher found (playwright/@playwright/test)');
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractRuntimeFailures(status, runtimeErrors = []) {
+  const failures = [];
+  for (const err of runtimeErrors) {
+    failures.push(createFailure('UNCAUGHT_EXCEPTION', String(err)));
+  }
+  for (const err of (status?.errors || [])) {
+    failures.push(createFailure('UNCAUGHT_EXCEPTION', String(err)));
+  }
+  for (const rej of (status?.rejections || [])) {
+    failures.push(createFailure('UNHANDLED_REJECTION', String(rej)));
+  }
+  for (const msg of (status?.consoleErrors || [])) {
+    failures.push(createFailure('CONSOLE_ERROR', String(msg)));
+  }
+  const rafTicks = Number(status?.rafTicks || 0);
+  if (rafTicks < 10) {
+    failures.push(createFailure('NO_RAF_HEARTBEAT', `rafTicks=${rafTicks} after ${HEARTBEAT_TIMEOUT_MS}ms`));
+  }
+  return failures;
+}
+
+function createStaticServer(rootDir) {
+  const server = http.createServer(async (req, res) => {
+    try {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      let pathname = decodeURIComponent(requestUrl.pathname || '/');
+      if (pathname === '/') pathname = '/index.html';
+      const safePath = path.normalize(pathname).replace(/^([.][.][/\\])+/, '');
+      const absolute = path.resolve(rootDir, `.${safePath.startsWith('/') ? safePath : `/${safePath}`}`);
+      if (!absolute.startsWith(path.resolve(rootDir))) {
+        res.statusCode = 403;
+        res.end('Forbidden');
+        return;
+      }
+      const exists = await fileExists(absolute);
+      if (!exists) {
+        res.statusCode = 404;
+        res.end('Not found');
+        return;
+      }
+      const ext = path.extname(absolute).toLowerCase();
+      const types = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.wav': 'audio/wav',
+        '.mp3': 'audio/mpeg'
+      };
+      res.setHeader('Content-Type', types[ext] || 'application/octet-stream');
+      const buffer = await fs.readFile(absolute);
+      res.end(buffer);
+    } catch {
+      res.statusCode = 500;
+      res.end('Server error');
+    }
+  });
+
+  return new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Failed to bind static server'));
+        return;
+      }
+      const url = `http://127.0.0.1:${address.port}`;
+      resolve({
+        url,
+        close: () => new Promise((done) => server.close(() => done()))
+      });
+    });
+    server.on('error', reject);
+  });
+}
+
+async function verifyRuntimeSingleFile(html) {
+  const chromium = await loadPlaywrightChromium();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error?.message || error)));
+
+  try {
+    await page.setContent(injectRuntimeBootstrap(html), { waitUntil: 'load', timeout: LOAD_TIMEOUT_MS });
+  } catch (error) {
+    await browser.close();
+    return { passed: false, failures: [createFailure('PAGE_LOAD_TIMEOUT', String(error?.message || error))], metrics: { ms: LOAD_TIMEOUT_MS } };
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < HEARTBEAT_TIMEOUT_MS) {
+    const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+    if (Number(status?.rafTicks || 0) >= 10) {
+      break;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+  await browser.close();
+  const failures = extractRuntimeFailures(status, pageErrors);
+  return {
+    passed: failures.length === 0,
+    failures,
+    metrics: {
+      ms: Date.now() - start,
+      rafTicks: Number(status?.rafTicks || 0),
+      consoleErrors: Array.isArray(status?.consoleErrors) ? status.consoleErrors.length : 0,
+      errors: Array.isArray(status?.errors) ? status.errors.length : 0,
+      rejections: Array.isArray(status?.rejections) ? status.rejections.length : 0
+    }
+  };
+}
+
+async function verifyRuntimeMultiFile(rootDir) {
+  const chromium = await loadPlaywrightChromium();
+  const server = await createStaticServer(rootDir);
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error?.message || error)));
+
+  try {
+    await page.goto(`${server.url}/index.html`, { waitUntil: 'load', timeout: LOAD_TIMEOUT_MS });
+  } catch (error) {
+    await browser.close();
+    await server.close();
+    return { passed: false, failures: [createFailure('NAVIGATION_FAILED', String(error?.message || error))], metrics: { ms: LOAD_TIMEOUT_MS } };
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < HEARTBEAT_TIMEOUT_MS) {
+    const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+    if (Number(status?.rafTicks || 0) >= 10) {
+      break;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+  await browser.close();
+  await server.close();
+  const failures = extractRuntimeFailures(status, pageErrors);
+  return {
+    passed: failures.length === 0,
+    failures,
+    metrics: {
+      ms: Date.now() - start,
+      rafTicks: Number(status?.rafTicks || 0),
+      consoleErrors: Array.isArray(status?.consoleErrors) ? status.consoleErrors.length : 0,
+      errors: Array.isArray(status?.errors) ? status.errors.length : 0,
+      rejections: Array.isArray(status?.rejections) ? status.rejections.length : 0
+    }
+  };
+}
+
+async function verifyRuntimeResult(result) {
+  if (!GAME_MODE_RUNTIME_VERIFY_ENABLED) {
+    return {
+      skipped: true,
+      downgrade: createFailure('RUNTIME_UNAVAILABLE', 'Runtime verify disabled; using static checks')
+    };
+  }
+  try {
+    return result.mode === 'single'
+      ? await verifyRuntimeSingleFile(result.html)
+      : await verifyRuntimeMultiFile(result.rootDir);
+  } catch (error) {
+    return {
+      skipped: true,
+      downgrade: createFailure('RUNTIME_UNAVAILABLE', String(error?.message || error))
+    };
+  }
+}
+
 function deterministicRepair(result, verification) {
   if (result.mode === 'single') {
     let html = String(result.html || '');
-    if (verification.failures.some((f) => f.includes('DOCTYPE')) && !html.toLowerCase().includes('<!doctype html>')) {
+    if (verification.failures.some((f) => String(f?.code || '').includes('DOCTYPE')) && !html.toLowerCase().includes('<!doctype html>')) {
       html = `<!doctype html>\n${html}`;
     }
-    if (verification.failures.some((f) => f.includes('No script tag')) && !html.includes('<script')) {
+    if (verification.failures.some((f) => String(f?.code || '').includes('NO_SCRIPT')) && !html.includes('<script')) {
       html = html.replace('</body>', '<script>console.log("repair pass");</script>\n</body>');
     }
-    if (verification.failures.some((f) => f.includes('No rendering loop detected')) && !html.toLowerCase().includes('requestanimationframe')) {
-      html = html.replace('</script>', '\nrequestAnimationFrame(()=>{});\n</script>');
+    if (verification.failures.some((f) => f?.code === 'NO_RAF_HEARTBEAT') && !html.toLowerCase().includes('requestanimationframe')) {
+      html = html.replace('</script>', '\n(function __gmRepairLoop(){ requestAnimationFrame(__gmRepairLoop); })();\n</script>');
+    }
+    if (verification.failures.some((f) => f?.code === 'UNCAUGHT_EXCEPTION' || f?.code === 'UNHANDLED_REJECTION')) {
+      html = html.replace('</script>', '\nwindow.addEventListener("error",()=>{});\n</script>');
     }
     result.html = html;
     return result;
@@ -1074,7 +1292,7 @@ async function buildDeterministicGameOutput(job) {
   const readme = `# Game Mode Build\n\nGenerated by deterministic Game Mode orchestrator.\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n# then open http://localhost:8080/${workspaceRelative(targetDir)}/\n\`\`\`\n\n## Deploy (GitHub Pages)\n\n1. Push this folder to a repo.\n2. In GitHub repo settings, enable Pages from main branch root.\n3. Wait for deployment and open the Pages URL.\n\n## Controls\n\nUpdate \`src/game.js\` with your mechanics and controls.\n`;
 
   await Promise.all([
-    fs.writeFile(path.join(targetDir, 'index.html'), html, 'utf8'),
+    fs.writeFile(path.join(targetDir, 'index.html'), injectRuntimeBootstrap(html), 'utf8'),
     fs.writeFile(path.join(targetDir, 'src', 'game.js'), js, 'utf8'),
     fs.writeFile(path.join(targetDir, 'README.md'), readme, 'utf8')
   ]);
@@ -1097,9 +1315,23 @@ async function runGameModeJob(job) {
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'running' });
   for (let pass = 0; pass <= MAX_FIX_PASSES; pass += 1) {
-    const verification = result.mode === 'single'
+    const staticVerification = result.mode === 'single'
       ? await verifySingleFile(result.html)
       : await verifyMultiFile(result.rootDir);
+
+    let verification = staticVerification;
+    if (staticVerification.passed) {
+      const runtimeVerification = await verifyRuntimeResult(result);
+      if (runtimeVerification.skipped) {
+        pushGameModeEvent(job, 'log', { text: `Runtime verify downgrade: ${runtimeVerification.downgrade.code}: ${runtimeVerification.downgrade.detail}` });
+      } else if (!runtimeVerification.passed) {
+        verification = runtimeVerification;
+        pushGameModeEvent(job, 'log', { text: `Runtime verify failed: ${runtimeVerification.failures.map((f) => f.code).join(', ')}` });
+      } else {
+        const m = runtimeVerification.metrics || {};
+        pushGameModeEvent(job, 'log', { text: `Runtime verify ok: rafTicks=${m.rafTicks || 0}, consoleErrors=${m.consoleErrors || 0}, errors=${m.errors || 0}, rejections=${m.rejections || 0}, ms=${m.ms || 0}` });
+      }
+    }
 
     if (verification.passed) {
       break;
@@ -1111,7 +1343,7 @@ async function runGameModeJob(job) {
       return;
     }
 
-    pushGameModeEvent(job, 'log', { text: `Fix pass ${pass + 1}: ${verification.failures.join(', ')}` });
+    pushGameModeEvent(job, 'log', { text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')}` });
     result = deterministicRepair(result, verification);
     if (result.mode === 'single' && result.htmlPath) {
       await fs.writeFile(result.htmlPath, result.html, 'utf8');
