@@ -776,40 +776,18 @@ app.get('/api/plans', (_req, res) => {
   return res.json({ plans: [] });
 });
 
-app.get('/api/session/state', async (req, res, next) => {
-  try {
-    const session = await getSessionFromRequest(req);
-    if (!session) {
-      return res.json({
-        authenticated: false,
-        user: null
-      });
-    }
-    return next();
-  } catch {
-    return res.json({
-      authenticated: false,
-      user: null
-    });
-  }
+app.get('/api/session/state', (_req, res) => {
+  return res.json({
+    authenticated: false,
+    user: null
+  });
 });
 
-app.get('/api/usage/overview', async (req, res, next) => {
-  try {
-    const session = await getSessionFromRequest(req);
-    if (!session) {
-      return res.json({
-        credits: 0,
-        plan: 'free'
-      });
-    }
-    return next();
-  } catch {
-    return res.json({
-      credits: 0,
-      plan: 'free'
-    });
-  }
+app.get('/api/usage/overview', (_req, res) => {
+  return res.json({
+    credits: 0,
+    plan: 'free'
+  });
 });
 
 app.post('/api/run', async (req, res) => {
@@ -3386,12 +3364,12 @@ export function broadcast(payload) {
 }
 
 wss.on('connection', (socket) => {
-  socket.send(JSON.stringify({ type: 'hello', ts: Date.now() }));
+  socket.send(JSON.stringify({ type: 'connected' }));
 });
 
 const port = process.env.PORT || 8080;
 server.listen(port, () => {
-  console.log('Maya API listening on', port);
+  console.log('Server listening on', port);
   logStructured('info', 'user_store_driver_selected', { user_store_driver: USER_STORE_DRIVER });
   startCreditResetScheduler();
 });
