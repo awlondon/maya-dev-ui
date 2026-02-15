@@ -780,12 +780,7 @@ function initComposerControls() {
       if (activeAgentBusy || isGenerating || chatState.locked) {
         return;
       }
-
-      try {
-        await startAgentExecution();
-      } catch (error) {
-        console.warn('Game mode execution failed.', error);
-      }
+      await startGameModeWorkflow();
     });
   }
 
@@ -809,6 +804,156 @@ function initComposerControls() {
   }
 
   updatePlayableButtonState();
+}
+
+async function openGameModeConfigModal() {
+  const dirsRes = await safeFetchJSON('/api/workspace/list?root=.openclaw/workspace', { credentials: 'include' }, { dirs: [] });
+  const availableDirs = Array.isArray(dirsRes?.dirs) ? dirsRes.dirs : [];
+
+  return new Promise((resolve) => {
+    const root = document.getElementById('modal-root');
+    if (!root) {
+      resolve(null);
+      return;
+    }
+
+    const options = availableDirs.map((dir) => `<option value="${escapeHtml(dir)}">${escapeHtml(dir)}</option>`).join('');
+
+    root.innerHTML = `
+      <div class="modal-panel" style="max-width:640px;width:min(92vw,640px)">
+        <h2>Game Mode Factory</h2>
+        <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+          <label class="modal-field"><span>Output</span>
+            <select id="gm-mode"><option value="single">Single-file HTML</option><option value="multi">Multi-file repository</option></select>
+          </label>
+          <label class="modal-field"><span>Prompt (optional)</span><textarea id="gm-prompt" rows="3" placeholder="Arcade roguelite with physics grappling hook"></textarea></label>
+          <label class="modal-field" style="flex-direction:row;align-items:center;gap:8px;"><input id="gm-seed" type="checkbox" checked /> Use current editor code as seed</label>
+          <label class="modal-field" id="gm-target-wrap" style="display:none;"><span>Target workspace folder</span>
+            <select id="gm-target"><option value="">Choose folder…</option>${options}</select>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="ghost-button" id="gm-cancel" type="button">Cancel</button>
+          <button id="gm-start" type="button">Start</button>
+        </div>
+      </div>
+    `;
+    root.classList.remove('hidden');
+
+    const modeEl = root.querySelector('#gm-mode');
+    const targetWrap = root.querySelector('#gm-target-wrap');
+    const targetEl = root.querySelector('#gm-target');
+
+    const syncMode = () => {
+      const isMulti = modeEl?.value === 'multi';
+      if (targetWrap) {
+        targetWrap.style.display = isMulti ? 'flex' : 'none';
+      }
+    };
+    modeEl?.addEventListener('change', syncMode);
+    syncMode();
+
+    root.querySelector('#gm-cancel')?.addEventListener('click', () => {
+      root.classList.add('hidden');
+      root.innerHTML = '';
+      resolve(null);
+    });
+
+    root.querySelector('#gm-start')?.addEventListener('click', () => {
+      const mode = modeEl?.value === 'multi' ? 'multi' : 'single';
+      const targetDir = String(targetEl?.value || '').trim();
+      if (mode === 'multi' && !targetDir) {
+        showToast('Select a target folder for multi-file output.', { variant: 'warning' });
+        return;
+      }
+      const payload = {
+        mode,
+        prompt: String(root.querySelector('#gm-prompt')?.value || ''),
+        seed: {
+          useEditorCode: Boolean(root.querySelector('#gm-seed')?.checked),
+          editorCode: getEditorCode()
+        },
+        targetDir,
+        options: {
+          framework: 'vanilla',
+          tone: 'any',
+          shipQuality: 'high'
+        }
+      };
+      root.classList.add('hidden');
+      root.innerHTML = '';
+      resolve(payload);
+    });
+  });
+}
+
+async function startGameModeWorkflow() {
+  const config = await openGameModeConfigModal();
+  if (!config) {
+    return;
+  }
+
+  const createRes = await safeFetchJSON('/api/game-mode/jobs', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config)
+  }, null);
+
+  const jobId = createRes?.jobId;
+  if (!jobId) {
+    showToast('Unable to start game mode job.', { variant: 'error' });
+    return;
+  }
+
+  showToast('Game Mode started. Building playable output…', { variant: 'success', duration: 2200 });
+  const eventUrl = `${API_BASE}/api/game-mode/jobs/${encodeURIComponent(jobId)}/stream`;
+  const source = new EventSource(eventUrl, { withCredentials: true });
+
+  source.addEventListener('step', (event) => {
+    const data = JSON.parse(event.data || '{}');
+    appendOutput(`[GameMode] ${data.name}: ${data.status || 'running'}`);
+  });
+
+  source.addEventListener('log', (event) => {
+    const data = JSON.parse(event.data || '{}');
+    if (data?.text) {
+      appendOutput(`[GameMode] ${data.text}`);
+    }
+  });
+
+  source.addEventListener('done', async () => {
+    source.close();
+    const result = await safeFetchJSON(`/api/game-mode/jobs/${encodeURIComponent(jobId)}/result`, { credentials: 'include' }, null);
+    if (!result) {
+      showToast('Game mode finished, but result could not be loaded.', { variant: 'error' });
+      return;
+    }
+
+    if (result.mode === 'single') {
+      const html = typeof result.html === 'string' ? result.html : '';
+      setEditorValue(html);
+      await handleUserRun(html, 'game-mode', 'Game mode output loaded.');
+      setWorkspacePanel('code');
+      showToast('Game mode complete. Single-file game loaded.', { variant: 'success' });
+      return;
+    }
+
+    const openPath = result.openPath || '';
+    if (openPath) {
+      const file = await safeFetchJSON(`/api/workspace/file?path=${encodeURIComponent(openPath)}`, { credentials: 'include' }, null);
+      if (typeof file?.content === 'string') {
+        setEditorValue(file.content);
+      }
+      setWorkspacePanel('code');
+    }
+    showToast('Game mode complete. README opened with deploy instructions.', { variant: 'success', duration: 2800 });
+  });
+
+  source.onerror = () => {
+    source.close();
+    showToast('Game mode stream interrupted.', { variant: 'error' });
+  };
 }
 
 async function prepareAgent() {
@@ -4137,7 +4282,6 @@ async function bootApp() {
   await initAgentSimulationHarness();
   ensureAgentsWorkspaceMounted();
   mountAgentSidePanel();
-  mountAgentToggleButton();
 
   appMachine.dispatch(EVENTS.START);
 
@@ -12973,9 +13117,10 @@ function mountAgentSidePanel() {
   wireAgentPanelEvents();
   initAgentWebSocket();
 
-  const persistedState = safeStorageGet('maya_agent_side_panel_open');
-  agentPanelOpen = persistedState === 'true';
-  agentSidePanel.style.transform = agentPanelOpen ? 'translateX(0)' : 'translateX(100%)';
+  // Deterministic initial layout: keep agent side panel collapsed on load.
+  // Do not restore open state from persisted storage to avoid startup layout shift.
+  agentPanelOpen = false;
+  agentSidePanel.style.transform = 'translateX(100%)';
 }
 
 function mountAgentToggleButton() {
@@ -12994,7 +13139,6 @@ function mountAgentToggleButton() {
       return;
     }
     agentPanelOpen = !agentPanelOpen;
-    safeStorageSet('maya_agent_side_panel_open', String(agentPanelOpen));
     agentSidePanel.style.transform = agentPanelOpen
       ? 'translateX(0)'
       : 'translateX(100%)';

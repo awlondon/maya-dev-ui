@@ -1980,25 +1980,26 @@ button:disabled {
 
 
 #workspace.workspace-pipeline-mode #right-pane {
-  overflow: auto;
+  overflow: hidden;
+  min-height: 0;
 }
 
 #workspace.workspace-pipeline-mode #code-panel,
 #workspace.workspace-pipeline-mode #output-panel,
 #workspace.workspace-pipeline-mode #agents-panel {
-  flex: 0 0 auto;
+  min-height: 0;
 }
 
 #workspace.workspace-pipeline-mode #code-panel {
-  min-height: 380px;
+  flex: 2 1 0;
 }
 
 #workspace.workspace-pipeline-mode #output-panel {
-  min-height: 360px;
+  flex: 1 1 0;
 }
 
 #workspace.workspace-pipeline-mode #agents-panel {
-  min-height: 420px;
+  flex: 1 1 0;
 }
 
 #right-pane .splitter {

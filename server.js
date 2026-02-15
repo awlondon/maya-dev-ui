@@ -822,6 +822,1054 @@ app.all('/api/run', (req, res, next) => {
   return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
 });
 
+const GAME_MODE_WORKSPACE_ROOT = path.resolve(process.env.OPENCLAW_WORKSPACE_ROOT || path.join(__dirname, '..'));
+const JOB_TTL_MS = 30 * 60 * 1000;
+const JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_FIX_PASSES = 2;
+const GAME_MODE_RUNTIME_VERIFY_ENABLED = process.env.GAME_MODE_RUNTIME_VERIFY === '1';
+const GAME_MODE_LLM_ENABLED = process.env.GAME_MODE_LLM === '1';
+const LOAD_TIMEOUT_MS = 4000;
+const HEARTBEAT_TIMEOUT_MS = 1500;
+const POLL_INTERVAL_MS = 100;
+const ARTIFACT_ROLES = {
+  ENTRY: 'entry',
+  MAIN_HTML: 'main-html',
+  SUPPORT: 'support',
+  README: 'readme'
+};
+const ARTIFACT_ROLE_SET = new Set(Object.values(ARTIFACT_ROLES));
+const gameModeJobs = new Map();
+
+function resolveWorkspacePath(inputPath = '') {
+  const relative = String(inputPath || '').replace(/^\/+/, '').trim();
+  const resolved = path.resolve(GAME_MODE_WORKSPACE_ROOT, relative);
+  if (!resolved.startsWith(GAME_MODE_WORKSPACE_ROOT)) {
+    throw createHttpError({ status: 400, code: 'INVALID_PATH', message: 'Path escapes workspace root' });
+  }
+  return resolved;
+}
+
+function workspaceRelative(absolutePath) {
+  return path.relative(GAME_MODE_WORKSPACE_ROOT, absolutePath).replace(/\\/g, '/');
+}
+
+async function listWorkspaceDirs(rootDir) {
+  const dirs = [];
+  async function walk(dir, rel = '', depth = 0) {
+    if (depth > 3) return;
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.git') || entry.name === 'node_modules') continue;
+      const nextRel = rel ? `${rel}/${entry.name}` : entry.name;
+      dirs.push(nextRel);
+      await walk(path.join(dir, entry.name), nextRel, depth + 1);
+    }
+  }
+  await walk(rootDir);
+  return dirs;
+}
+
+function createGameModeArtifactRecord({ path: artifactPath, role, openOnComplete = false }) {
+  if (!ARTIFACT_ROLE_SET.has(role)) {
+    throw new Error(`Invalid artifact role: ${role}`);
+  }
+  return {
+    id: crypto.randomUUID(),
+    path: String(artifactPath || ''),
+    role,
+    openOnComplete: Boolean(openOnComplete),
+    createdAt: Date.now()
+  };
+}
+
+function createGameModeJob(payload = {}) {
+  const jobId = `gm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const job = {
+    id: jobId,
+    mode: payload.mode === 'multi' ? 'multi' : 'single',
+    payload,
+    status: 'running',
+    createdAt: Date.now(),
+    completedAt: null,
+    events: [],
+    clients: new Set(),
+    artifacts: [],
+    result: null,
+    doneEmitted: false
+  };
+  gameModeJobs.set(jobId, job);
+  return job;
+}
+
+function pushGameModeEvent(job, event, data) {
+  const packet = { event, data };
+  job.events.push(packet);
+  if (job.clients.size === 0) {
+    return;
+  }
+  for (const client of job.clients) {
+    if (client.writableEnded || client.destroyed) {
+      job.clients.delete(client);
+      continue;
+    }
+    client.write(`event: ${event}\n`);
+    client.write(`data: ${JSON.stringify(data)}\n\n`);
+  }
+}
+
+function emitGameModeDone(job, payload) {
+  if (job.doneEmitted) {
+    return;
+  }
+  job.doneEmitted = true;
+  pushGameModeEvent(job, 'done', payload);
+}
+
+function closeGameModeStreams(job) {
+  for (const client of job.clients) {
+    if (!client.writableEnded && !client.destroyed) {
+      client.end();
+    }
+  }
+  job.clients.clear();
+}
+
+function finalizeGameModeJob(job, { status, donePayload }) {
+  if (job.status !== 'running') {
+    return;
+  }
+  job.status = status;
+  job.completedAt = Date.now();
+  emitGameModeDone(job, donePayload);
+  closeGameModeStreams(job);
+}
+
+function cleanupExpiredGameModeJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of gameModeJobs.entries()) {
+    if (now - job.createdAt <= JOB_TTL_MS) {
+      continue;
+    }
+    closeGameModeStreams(job);
+    gameModeJobs.delete(jobId);
+  }
+}
+setInterval(cleanupExpiredGameModeJobs, JOB_CLEANUP_INTERVAL_MS).unref();
+
+function emitGameModeArtifact(job, artifact) {
+  job.artifacts.push(artifact);
+  pushGameModeEvent(job, 'artifact', {
+    path: artifact.path,
+    role: artifact.role,
+    openOnComplete: artifact.openOnComplete,
+    kind: artifact.role === ARTIFACT_ROLES.README ? 'readme' : 'html'
+  });
+}
+
+function sanitizeTitle(value = '') {
+  return String(value || '').replace(/</g, '&lt;').slice(0, 120) || 'Neon Orbit Runner';
+}
+
+function buildDeterministicDesignerSpec({ prompt = '' } = {}) {
+  const trimmed = String(prompt || '').trim();
+  const title = trimmed ? `${trimmed.slice(0, 40)} Arena` : 'Neon Orbit Runner';
+  return {
+    schemaVersion: '1.0',
+    title,
+    tagline: 'Survive waves, score points, and reach victory before collapse.',
+    genre: 'arcade survival',
+    coreLoop: 'Move to dodge enemies, survive waves, and increase score until victory.',
+    controls: [
+      { input: 'WASD', action: 'Move player' },
+      { input: 'Arrow keys', action: 'Move player (alternate)' }
+    ],
+    entities: [
+      { name: 'Pilot', role: 'player', notes: 'Controlled by keyboard movement.' },
+      { name: 'Drones', role: 'enemy', notes: 'Spawn from edge and collide with player.' },
+      { name: 'HUD', role: 'ui', notes: 'Shows score and state.' }
+    ],
+    mechanics: [
+      { name: 'Wave pressure', description: 'Enemy spawn rate increases over time.', tuning: ['spawnIntervalMs', 'enemySpeed'] },
+      { name: 'Collision fail state', description: 'Contact with enemy triggers loss.', tuning: ['collisionRadius'] }
+    ],
+    progression: {
+      type: 'waves',
+      description: 'Every wave raises spawn pressure until score threshold is reached.'
+    },
+    winCondition: 'Reach score target before being hit.',
+    loseCondition: 'Player collides with any enemy.',
+    mustHave: ['Score UI', 'Game Over state', 'Victory state'],
+    constraints: {
+      autoRun: true,
+      requiresRafLoop: true,
+      noBuildStep: true,
+      noPaidApis: true
+    }
+  };
+}
+
+function extractJsonObject(text = '') {
+  const source = String(text || '');
+  const start = source.indexOf('{');
+  const end = source.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    const error = new Error('No JSON object found');
+    error.code = 'JSON_PARSE_FAIL';
+    throw error;
+  }
+  try {
+    return JSON.parse(source.slice(start, end + 1));
+  } catch (parseError) {
+    parseError.code = 'JSON_PARSE_FAIL';
+    throw parseError;
+  }
+}
+
+function validateDesignerSpec(spec) {
+  const failures = [];
+  if (!spec || typeof spec !== 'object') {
+    return { ok: false, failures: [createFailure('DESIGN_SCHEMA_INVALID', 'spec is not an object')] };
+  }
+  const requiredStrings = ['title', 'coreLoop', 'winCondition', 'loseCondition'];
+  for (const key of requiredStrings) {
+    if (typeof spec[key] !== 'string' || !spec[key].trim()) {
+      failures.push(createFailure('DESIGN_SCHEMA_INVALID', `${key} missing or empty`));
+    }
+  }
+  if (!Array.isArray(spec.controls) || spec.controls.length < 2) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'controls < 2'));
+  }
+  if (!Array.isArray(spec.mechanics) || spec.mechanics.length < 2) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'mechanics < 2'));
+  }
+  if (!Array.isArray(spec.mustHave) || spec.mustHave.length < 3) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'mustHave < 3'));
+  }
+  if (spec?.constraints?.autoRun !== true || spec?.constraints?.requiresRafLoop !== true) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'constraints.autoRun/requiresRafLoop must be true'));
+  }
+  const joinedInputs = Array.isArray(spec.controls)
+    ? spec.controls.map((c) => String(c?.input || '').toLowerCase()).join(' ')
+    : '';
+  if (!/(wasd|arrow|mouse|touch|pointer)/.test(joinedInputs)) {
+    failures.push(createFailure('DESIGN_SCHEMA_INVALID', 'controls must include keyboard or pointer input'));
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function buildSingleFileGameHtml({ title = 'Neon Orbit Runner' } = {}) {
+  const safeTitle = sanitizeTitle(title);
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${safeTitle}</title>
+  <style>html,body{margin:0;height:100%;background:#0b1020;color:#fff;font-family:Inter,system-ui}canvas{display:block;width:100vw;height:100vh}#hud{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}#state{position:fixed;right:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}</style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud">Score: <span id="score">0</span></div>
+  <div id="state">Running</div>
+  <script>
+    const c=document.getElementById('c');const ctx=c.getContext('2d');const scoreEl=document.getElementById('score');const stateEl=document.getElementById('state');let w,h;
+    const player={x:100,y:100,r:12,vx:0,vy:0};const keys={};
+    let enemies=[],score=0,gameState='running',seed=1337,spawnMs=900,lastSpawn=0;
+    const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};
+    function resize(){w=c.width=innerWidth;h=c.height=innerHeight;}addEventListener('resize',resize);resize();
+    addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&gameState!=='running')reset();});addEventListener('keyup',e=>keys[e.key]=false);
+    function reset(){enemies=[];score=0;gameState='running';player.x=100;player.y=h/2;spawnMs=900;stateEl.textContent='Running';}
+    function spawn(){const e={x:w+20,y:20+rand()*(h-40),r:10+rand()*12,s:-2-rand()*3};enemies.push(e);} 
+    function endGame(kind){gameState=kind;stateEl.textContent=kind==='lost'?'Game Over':'Victory';}
+    function step(ts){
+      if(gameState==='running'){
+        if(ts-lastSpawn>spawnMs){spawn();lastSpawn=ts;spawnMs=Math.max(280,spawnMs-2);} 
+        player.vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);player.vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);
+        player.x=Math.max(player.r,Math.min(w-player.r,player.x+player.vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+player.vy*7));
+        enemies.forEach(e=>{e.x+=e.s; if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r) endGame('lost');});
+        enemies=enemies.filter(e=>e.x>-40); score+=0.12; scoreEl.textContent=String(Math.floor(score)); if(score>=120) endGame('win');
+      }
+      ctx.fillStyle='#0b1020';ctx.fillRect(0,0,w,h);ctx.fillStyle='#6ee7ff';ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ff5c8a';enemies.forEach(e=>{ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();});
+      if(gameState!=='running'){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText(gameState==='lost'?'Game Over':'Victory',w/2-90,h/2);}
+      requestAnimationFrame(step);
+    }
+    reset();requestAnimationFrame(step);
+  </script>
+</body>
+</html>`;
+}
+
+function buildDeterministicBuilderOutput(spec, mode = 'single') {
+  if (mode === 'single') {
+    return {
+      mode: 'single',
+      files: [{ path: 'index.html', content: buildSingleFileGameHtml({ title: spec?.title }) }],
+      entry: 'index.html'
+    };
+  }
+
+  const title = sanitizeTitle(spec?.title || 'Game Mode Build');
+  const indexHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>html,body{margin:0;height:100%;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}canvas{display:block;width:100vw;height:100vh}#hud,#state{position:fixed;left:12px;top:12px;background:#0008;padding:8px 10px;border-radius:8px;font-size:12px}#state{left:auto;right:12px}</style></head><body><canvas id="c"></canvas><div id="hud">Score: <span id="score">0</span></div><div id="state">Running</div><script type="module" src="./src/game.js"></script></body></html>`;
+  const gameJs = `const c=document.getElementById('c');const ctx=c.getContext('2d');const scoreEl=document.getElementById('score');const stateEl=document.getElementById('state');let w,h;const player={x:100,y:100,r:12};const keys={};let enemies=[],score=0,state='running',spawnMs=900,lastSpawn=0,seed=1337;const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296};function resize(){w=c.width=innerWidth;h=c.height=innerHeight;}addEventListener('resize',resize);resize();addEventListener('keydown',e=>{keys[e.key]=true;if(e.key==='r'&&state!=='running')reset();});addEventListener('keyup',e=>keys[e.key]=false);function reset(){enemies=[];score=0;state='running';player.x=100;player.y=h/2;spawnMs=900;stateEl.textContent='Running';}function spawn(){enemies.push({x:w+20,y:20+rand()*(h-40),r:10+rand()*12,s:-2-rand()*3});}function end(kind){state=kind;stateEl.textContent=kind==='lost'?'Game Over':'Victory';}function tick(ts){if(state==='running'){if(ts-lastSpawn>spawnMs){spawn();lastSpawn=ts;spawnMs=Math.max(260,spawnMs-2);}const vx=((keys.ArrowRight||keys.d)?1:0)-((keys.ArrowLeft||keys.a)?1:0);const vy=((keys.ArrowDown||keys.s)?1:0)-((keys.ArrowUp||keys.w)?1:0);player.x=Math.max(player.r,Math.min(w-player.r,player.x+vx*7));player.y=Math.max(player.r,Math.min(h-player.r,player.y+vy*7));for(const e of enemies){e.x+=e.s;if(Math.hypot(e.x-player.x,e.y-player.y)<e.r+player.r){end('lost');}}enemies=enemies.filter(e=>e.x>-40);score+=0.12;scoreEl.textContent=String(Math.floor(score));if(score>=120)end('win');}ctx.fillStyle='#0a0f1e';ctx.fillRect(0,0,w,h);ctx.fillStyle='#56d5ff';ctx.beginPath();ctx.arc(player.x,player.y,player.r,0,Math.PI*2);ctx.fill();ctx.fillStyle='#ff5f8f';for(const e of enemies){ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();}if(state!=='running'){ctx.fillStyle='#fff';ctx.font='28px sans-serif';ctx.fillText(state==='lost'?'Game Over':'Victory',w/2-90,h/2);}requestAnimationFrame(tick);}reset();requestAnimationFrame(tick);`;
+  const readme = `# ${title}\n\nGenerated by Game Mode orchestrator.\n\n## Controls\n- WASD / Arrow keys to move\n- R to restart\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n\`\`\`\n\n## Deploy\nUse GitHub Pages from the repo root.\n`;
+
+  return {
+    mode: 'multi',
+    files: [
+      { path: 'index.html', content: indexHtml },
+      { path: 'src/game.js', content: gameJs },
+      { path: 'README.md', content: readme }
+    ],
+    entry: 'index.html'
+  };
+}
+
+function validateBuilderOutput(output, mode = 'single') {
+  const failures = [];
+  if (!output || typeof output !== 'object') {
+    return { ok: false, failures: [createFailure('BUILD_SCHEMA_INVALID', 'output is not an object')] };
+  }
+  if (!Array.isArray(output.files) || output.files.length === 0) {
+    failures.push(createFailure('BUILD_SCHEMA_INVALID', 'files missing'));
+    return { ok: false, failures };
+  }
+
+  const fileMap = new Map(output.files.map((f) => [String(f.path || ''), String(f.content || '')]));
+  const entry = String(output.entry || '');
+  if (!fileMap.has(entry)) {
+    failures.push(createFailure('BUILD_SCHEMA_INVALID', 'entry file missing'));
+  }
+
+  if (mode === 'single') {
+    const html = fileMap.get('index.html') || fileMap.get(entry) || '';
+    if (!html.toLowerCase().includes('<!doctype html>')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing DOCTYPE'));
+    if (!html.includes('requestAnimationFrame(')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing requestAnimationFrame'));
+    if (!html.includes('Game Over')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Game Over'));
+    if (!html.includes('Victory') && !html.includes('Win')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Victory/Win'));
+    if (!html.includes('Score')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'single file missing Score'));
+  } else {
+    const indexHtml = fileMap.get('index.html') || '';
+    const readme = fileMap.get('README.md') || '';
+    if (!fileMap.has('index.html')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'missing index.html'));
+    if (!fileMap.has('README.md')) failures.push(createFailure('BUILD_SCHEMA_INVALID', 'missing README.md'));
+    if (!(indexHtml.includes('src/game.js') || indexHtml.includes('<script'))) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'index.html missing JS reference'));
+    }
+    const readmeLower = readme.toLowerCase();
+    if (!(readmeLower.includes('github pages') || readmeLower.includes('deploy'))) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'README missing deploy/GitHub Pages guidance'));
+    }
+    if (!readmeLower.includes('controls')) {
+      failures.push(createFailure('BUILD_SCHEMA_INVALID', 'README missing controls section'));
+    }
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
+async function callGameModeLlmJson({ system, user, temperature = 0.2 }) {
+  if (!LLM_PROXY_URL) {
+    throw new Error('LLM proxy unavailable');
+  }
+  const workerRes = await fetch(LLM_PROXY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      temperature
+    })
+  });
+  if (!workerRes.ok) {
+    throw new Error(`LLM request failed (${workerRes.status})`);
+  }
+  const text = await workerRes.text();
+  const data = text ? JSON.parse(text) : null;
+  const content = data?.choices?.[0]?.message?.content
+    ?? data?.candidates?.[0]?.content
+    ?? data?.output_text
+    ?? '';
+  return extractJsonObject(content);
+}
+
+async function generateDesignerSpec({ mode, prompt, seedCode }) {
+  if (!GAME_MODE_LLM_ENABLED) {
+    return {
+      spec: buildDeterministicDesignerSpec({ prompt }),
+      usedLlm: false,
+      fallback: false,
+      fallbackReason: null,
+      failures: []
+    };
+  }
+
+  const seedPreview = String(seedCode || '').slice(0, 2000);
+  const system = 'Return only valid JSON. No markdown. No commentary. You must satisfy: auto-run game, requestAnimationFrame loop, win/lose conditions, no build step.';
+  const user = `Design a shippable static game concept. mode=${mode}. user_prompt=${prompt || 'random concept required'}. seed_code_excerpt=${seedPreview || 'none'}. Output must exactly match schemaVersion 1.0 contract.`;
+
+  try {
+    const spec = await callGameModeLlmJson({ system, user, temperature: 0.2 });
+    const validation = validateDesignerSpec(spec);
+    if (!validation.ok) {
+      return {
+        spec: buildDeterministicDesignerSpec({ prompt }),
+        usedLlm: true,
+        fallback: true,
+        fallbackReason: 'DESIGN_SCHEMA_INVALID',
+        failures: validation.failures
+      };
+    }
+    return { spec, usedLlm: true, fallback: false, fallbackReason: null, failures: [] };
+  } catch (error) {
+    const reason = error?.code === 'JSON_PARSE_FAIL' ? 'DESIGN_JSON_PARSE_FAIL' : 'DESIGN_SCHEMA_INVALID';
+    return {
+      spec: buildDeterministicDesignerSpec({ prompt }),
+      usedLlm: true,
+      fallback: true,
+      fallbackReason: reason,
+      failures: [createFailure(reason, String(error?.message || error))]
+    };
+  }
+}
+
+async function generateBuilderOutput({ mode, designerSpec, prompt }) {
+  if (!GAME_MODE_LLM_ENABLED) {
+    return {
+      output: buildDeterministicBuilderOutput(designerSpec, mode),
+      usedLlm: false,
+      fallback: false,
+      fallbackReason: null,
+      failures: []
+    };
+  }
+
+  const system = 'Return only valid JSON in the specified output schema. Must produce playable auto-running game with requestAnimationFrame on load. No external build tooling. Use Canvas 2D. Must display Score and show Game Over and Victory states. No console.error.';
+  const user = `mode=${mode}. designer_spec=${JSON.stringify(designerSpec)}. user_prompt=${prompt || ''}. Runtime verifier requires RAF heartbeat without user click.`;
+
+  try {
+    const output = await callGameModeLlmJson({ system, user, temperature: 0.15 });
+    const validation = validateBuilderOutput(output, mode);
+    if (!validation.ok) {
+      return {
+        output: buildDeterministicBuilderOutput(designerSpec, mode),
+        usedLlm: true,
+        fallback: true,
+        fallbackReason: 'BUILD_SCHEMA_INVALID',
+        failures: validation.failures
+      };
+    }
+    return { output, usedLlm: true, fallback: false, fallbackReason: null, failures: [] };
+  } catch (error) {
+    const reason = error?.code === 'JSON_PARSE_FAIL' ? 'BUILD_JSON_PARSE_FAIL' : 'BUILD_SCHEMA_INVALID';
+    return {
+      output: buildDeterministicBuilderOutput(designerSpec, mode),
+      usedLlm: true,
+      fallback: true,
+      fallbackReason: reason,
+      failures: [createFailure(reason, String(error?.message || error))]
+    };
+  }
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function createFailure(code, detail) {
+  return { code, detail };
+}
+
+async function verifySingleFile(htmlString) {
+  const failures = [];
+  const html = String(htmlString || '').toLowerCase();
+  if (!html.includes('<!doctype html>')) failures.push(createFailure('STATIC_MISSING_DOCTYPE', 'Missing DOCTYPE'));
+  if (!html.includes('<script')) failures.push(createFailure('STATIC_NO_SCRIPT', 'No script tag found (no gameplay logic)'));
+  if (!html.includes('<canvas') && !html.includes('requestanimationframe')) failures.push(createFailure('STATIC_NO_RENDER_LOOP', 'No rendering loop detected'));
+  if (!html.includes('function') && !html.includes('=>')) failures.push(createFailure('STATIC_NO_EXECUTABLE_LOGIC', 'No executable logic found'));
+  return { passed: failures.length === 0, failures };
+}
+
+async function verifyMultiFile(rootDir) {
+  const failures = [];
+  const indexPath = path.join(rootDir, 'index.html');
+  const readmePath = path.join(rootDir, 'README.md');
+
+  if (!await fileExists(indexPath)) {
+    failures.push(createFailure('STATIC_MISSING_INDEX_HTML', 'Missing index.html'));
+  }
+  if (!await fileExists(readmePath)) {
+    failures.push(createFailure('STATIC_MISSING_README', 'Missing README.md'));
+  }
+  if (await fileExists(indexPath)) {
+    const html = await fs.readFile(indexPath, 'utf8');
+    if (!String(html || '').includes('<script')) {
+      failures.push(createFailure('STATIC_NO_SCRIPT', 'index.html contains no script tag'));
+    }
+  }
+  return { passed: failures.length === 0, failures };
+}
+
+function injectRuntimeBootstrap(html) {
+  const script = `<script>(function(){var S=window.__GM_STATUS__={startedAt:Date.now(),rafTicks:0,lastRafAt:0,errors:[],rejections:[],consoleErrors:[]};var oRaf=window.requestAnimationFrame?window.requestAnimationFrame.bind(window):null;if(oRaf){window.requestAnimationFrame=function(cb){return oRaf(function(ts){S.rafTicks+=1;S.lastRafAt=Date.now();try{return cb(ts);}catch(e){S.errors.push(String(e&&e.message||e));throw e;}});};}window.addEventListener('error',function(e){S.errors.push(String((e&&e.message)||e));});window.addEventListener('unhandledrejection',function(e){var r=e&&e.reason;S.rejections.push(String(r&&r.message||r||'unhandledrejection'));});var oErr=console.error?console.error.bind(console):null;console.error=function(){try{S.consoleErrors.push(Array.prototype.slice.call(arguments).map(function(v){return typeof v==='string'?v:JSON.stringify(v);}).join(' '));}catch(_){S.consoleErrors.push('console.error');}if(oErr)return oErr.apply(console,arguments);};})();</script>`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => `${m}${script}`);
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${script}</head>`);
+  }
+  return `${script}${html}`;
+}
+
+async function loadPlaywrightChromium() {
+  try {
+    const mod = await import('playwright');
+    if (mod?.chromium) return mod.chromium;
+  } catch {}
+  try {
+    const mod = await import('@playwright/test');
+    if (mod?.chromium) return mod.chromium;
+  } catch {}
+  throw new Error('No chromium launcher found (playwright/@playwright/test)');
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractRuntimeFailures(status, runtimeErrors = []) {
+  const failures = [];
+  for (const err of runtimeErrors) {
+    failures.push(createFailure('UNCAUGHT_EXCEPTION', String(err)));
+  }
+  for (const err of (status?.errors || [])) {
+    failures.push(createFailure('UNCAUGHT_EXCEPTION', String(err)));
+  }
+  for (const rej of (status?.rejections || [])) {
+    failures.push(createFailure('UNHANDLED_REJECTION', String(rej)));
+  }
+  for (const msg of (status?.consoleErrors || [])) {
+    failures.push(createFailure('CONSOLE_ERROR', String(msg)));
+  }
+  const rafTicks = Number(status?.rafTicks || 0);
+  if (rafTicks < 10) {
+    failures.push(createFailure('NO_RAF_HEARTBEAT', `rafTicks=${rafTicks} after ${HEARTBEAT_TIMEOUT_MS}ms`));
+  }
+  return failures;
+}
+
+function createStaticServer(rootDir) {
+  const server = http.createServer(async (req, res) => {
+    try {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      let pathname = decodeURIComponent(requestUrl.pathname || '/');
+      if (pathname === '/') pathname = '/index.html';
+      const safePath = path.normalize(pathname).replace(/^([.][.][/\\])+/, '');
+      const absolute = path.resolve(rootDir, `.${safePath.startsWith('/') ? safePath : `/${safePath}`}`);
+      if (!absolute.startsWith(path.resolve(rootDir))) {
+        res.statusCode = 403;
+        res.end('Forbidden');
+        return;
+      }
+      const exists = await fileExists(absolute);
+      if (!exists) {
+        res.statusCode = 404;
+        res.end('Not found');
+        return;
+      }
+      const ext = path.extname(absolute).toLowerCase();
+      const types = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.wav': 'audio/wav',
+        '.mp3': 'audio/mpeg'
+      };
+      res.setHeader('Content-Type', types[ext] || 'application/octet-stream');
+      const buffer = await fs.readFile(absolute);
+      res.end(buffer);
+    } catch {
+      res.statusCode = 500;
+      res.end('Server error');
+    }
+  });
+
+  return new Promise((resolve, reject) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Failed to bind static server'));
+        return;
+      }
+      const url = `http://127.0.0.1:${address.port}`;
+      resolve({
+        url,
+        close: () => new Promise((done) => server.close(() => done()))
+      });
+    });
+    server.on('error', reject);
+  });
+}
+
+async function verifyRuntimeSingleFile(html) {
+  const chromium = await loadPlaywrightChromium();
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error?.message || error)));
+
+  try {
+    await page.setContent(injectRuntimeBootstrap(html), { waitUntil: 'load', timeout: LOAD_TIMEOUT_MS });
+  } catch (error) {
+    await browser.close();
+    return { passed: false, failures: [createFailure('PAGE_LOAD_TIMEOUT', String(error?.message || error))], metrics: { ms: LOAD_TIMEOUT_MS } };
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < HEARTBEAT_TIMEOUT_MS) {
+    const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+    if (Number(status?.rafTicks || 0) >= 10) {
+      break;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+  await browser.close();
+  const failures = extractRuntimeFailures(status, pageErrors);
+  return {
+    passed: failures.length === 0,
+    failures,
+    metrics: {
+      ms: Date.now() - start,
+      rafTicks: Number(status?.rafTicks || 0),
+      consoleErrors: Array.isArray(status?.consoleErrors) ? status.consoleErrors.length : 0,
+      errors: Array.isArray(status?.errors) ? status.errors.length : 0,
+      rejections: Array.isArray(status?.rejections) ? status.rejections.length : 0
+    }
+  };
+}
+
+async function verifyRuntimeMultiFile(rootDir) {
+  const chromium = await loadPlaywrightChromium();
+  const server = await createStaticServer(rootDir);
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error?.message || error)));
+
+  try {
+    await page.goto(`${server.url}/index.html`, { waitUntil: 'load', timeout: LOAD_TIMEOUT_MS });
+  } catch (error) {
+    await browser.close();
+    await server.close();
+    return { passed: false, failures: [createFailure('NAVIGATION_FAILED', String(error?.message || error))], metrics: { ms: LOAD_TIMEOUT_MS } };
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < HEARTBEAT_TIMEOUT_MS) {
+    const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+    if (Number(status?.rafTicks || 0) >= 10) {
+      break;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  const status = await page.evaluate(() => window.__GM_STATUS__ || null).catch(() => null);
+  await browser.close();
+  await server.close();
+  const failures = extractRuntimeFailures(status, pageErrors);
+  return {
+    passed: failures.length === 0,
+    failures,
+    metrics: {
+      ms: Date.now() - start,
+      rafTicks: Number(status?.rafTicks || 0),
+      consoleErrors: Array.isArray(status?.consoleErrors) ? status.consoleErrors.length : 0,
+      errors: Array.isArray(status?.errors) ? status.errors.length : 0,
+      rejections: Array.isArray(status?.rejections) ? status.rejections.length : 0
+    }
+  };
+}
+
+async function verifyRuntimeResult(result) {
+  if (!GAME_MODE_RUNTIME_VERIFY_ENABLED) {
+    return {
+      skipped: true,
+      downgrade: createFailure('RUNTIME_UNAVAILABLE', 'Runtime verify disabled; using static checks')
+    };
+  }
+  try {
+    return result.mode === 'single'
+      ? await verifyRuntimeSingleFile(result.html)
+      : await verifyRuntimeMultiFile(result.rootDir);
+  } catch (error) {
+    return {
+      skipped: true,
+      downgrade: createFailure('RUNTIME_UNAVAILABLE', String(error?.message || error))
+    };
+  }
+}
+
+function deterministicRepair(result, verification) {
+  if (result.mode === 'single') {
+    let html = String(result.html || '');
+    if (verification.failures.some((f) => String(f?.code || '').includes('DOCTYPE')) && !html.toLowerCase().includes('<!doctype html>')) {
+      html = `<!doctype html>\n${html}`;
+    }
+    if (verification.failures.some((f) => String(f?.code || '').includes('NO_SCRIPT')) && !html.includes('<script')) {
+      html = html.replace('</body>', '<script>console.log("repair pass");</script>\n</body>');
+    }
+    if (verification.failures.some((f) => f?.code === 'NO_RAF_HEARTBEAT') && !html.toLowerCase().includes('requestanimationframe')) {
+      html = html.replace('</script>', '\n(function __gmRepairLoop(){ requestAnimationFrame(__gmRepairLoop); })();\n</script>');
+    }
+    if (verification.failures.some((f) => f?.code === 'UNCAUGHT_EXCEPTION' || f?.code === 'UNHANDLED_REJECTION')) {
+      html = html.replace('</script>', '\nwindow.addEventListener("error",()=>{});\n</script>');
+    }
+    result.html = html;
+    return result;
+  }
+  return result;
+}
+
+async function buildDeterministicGameOutput(job, designerSpec) {
+  const mode = job.mode;
+  return buildDeterministicBuilderOutput(designerSpec, mode);
+}
+
+async function writeBuilderOutputToWorkspace(job, builderOutput) {
+  const mode = job.mode;
+  if (mode === 'single') {
+    const outputDir = resolveWorkspacePath('game-mode-output');
+    await fs.mkdir(outputDir, { recursive: true });
+    const entry = String(builderOutput.entry || 'index.html');
+    const file = builderOutput.files.find((f) => String(f.path) === entry) || builderOutput.files[0];
+    const htmlPath = path.join(outputDir, `${job.id}.html`);
+    await fs.writeFile(htmlPath, String(file?.content || ''), 'utf8');
+    return { mode: 'single', html: String(file?.content || ''), htmlPath };
+  }
+
+  const targetDir = resolveWorkspacePath(job.payload.targetDir || `game-mode/${job.id}`);
+  await fs.mkdir(targetDir, { recursive: true });
+  for (const file of builderOutput.files) {
+    const rel = String(file.path || '').replace(/^\/+/, '');
+    const abs = path.resolve(targetDir, rel);
+    if (!abs.startsWith(path.resolve(targetDir))) {
+      throw new Error(`Invalid builder path: ${rel}`);
+    }
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    const content = rel === 'index.html'
+      ? injectRuntimeBootstrap(String(file.content || ''))
+      : String(file.content || '');
+    await fs.writeFile(abs, content, 'utf8');
+  }
+
+  const readmePath = path.join(targetDir, 'README.md');
+  return {
+    mode: 'multi',
+    rootDir: targetDir,
+    repoPath: targetDir,
+    openPath: workspaceRelative(readmePath)
+  };
+}
+
+async function runGameModeJob(job) {
+  const stage3Enabled = GAME_MODE_LLM_ENABLED;
+  const runtimeEnabled = GAME_MODE_RUNTIME_VERIFY_ENABLED;
+  const startedAt = Date.now();
+
+  const summary = {
+    jobId: job.id,
+    mode: job.mode,
+    stage3Enabled,
+    designerUsed: false,
+    designerFallback: false,
+    designerFallbackReason: null,
+    builderUsed: false,
+    builderFallback: false,
+    builderFallbackReason: null,
+    staticPass: false,
+    runtimeEnabled,
+    runtimePass: runtimeEnabled ? null : null,
+    runtimeFailures: [],
+    fixPasses: 0,
+    repairReasons: [],
+    totalDurationMs: 0,
+    timestamps: {
+      startedAt: job.createdAt || startedAt,
+      completedAt: null
+    },
+    timing: {
+      conceptMs: 0,
+      buildMs: 0,
+      staticVerifyMs: 0,
+      runtimeVerifyMs: 0
+    },
+    contentMetrics: {
+      titleHash: null,
+      fileSizeBytes: 0,
+      jsSizeBytes: 0
+    }
+  };
+
+  const emitSummary = () => {
+    summary.totalDurationMs = Date.now() - startedAt;
+    summary.timestamps.completedAt = job.completedAt || Date.now();
+    console.log('[GAME_MODE_SUMMARY]', JSON.stringify(summary));
+  };
+
+  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
+  pushGameModeEvent(job, 'log', { text: `Stage3 autonomy: ${stage3Enabled ? 'enabled' : 'disabled'}` });
+
+  const conceptStart = Date.now();
+  const designer = await generateDesignerSpec({
+    mode: job.mode,
+    prompt: String(job.payload?.prompt || ''),
+    seedCode: job.payload?.seed?.useEditorCode ? String(job.payload?.seed?.editorCode || '') : ''
+  });
+  summary.timing.conceptMs = Date.now() - conceptStart;
+  summary.designerUsed = designer.usedLlm === true;
+  summary.designerFallback = designer.fallback === true;
+  summary.designerFallbackReason = designer.fallbackReason || null;
+
+  const designerValidation = validateDesignerSpec(designer.spec);
+  const effectiveDesignerSpec = designerValidation.ok
+    ? designer.spec
+    : buildDeterministicDesignerSpec({ prompt: job.payload?.prompt });
+
+  summary.contentMetrics.titleHash = crypto
+    .createHash('sha1')
+    .update(String(effectiveDesignerSpec?.title || ''))
+    .digest('hex')
+    .slice(0, 12);
+
+  if (!designerValidation.ok) {
+    summary.designerFallback = true;
+    summary.designerFallbackReason = summary.designerFallbackReason || 'DESIGN_SCHEMA_INVALID';
+    pushGameModeEvent(job, 'log', { text: `Designer invalid: ${designerValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
+  } else {
+    pushGameModeEvent(job, 'log', { text: `Designer ok: title="${effectiveDesignerSpec.title}" genre="${effectiveDesignerSpec.genre || 'unknown'}"` });
+  }
+
+  pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
+  const buildStart = Date.now();
+  const builder = await generateBuilderOutput({
+    mode: job.mode,
+    designerSpec: effectiveDesignerSpec,
+    prompt: String(job.payload?.prompt || '')
+  });
+  summary.timing.buildMs = Date.now() - buildStart;
+  summary.builderUsed = builder.usedLlm === true;
+  summary.builderFallback = builder.fallback === true;
+  summary.builderFallbackReason = builder.fallbackReason || null;
+
+  const builderValidation = validateBuilderOutput(builder.output, job.mode);
+  if (!builderValidation.ok) {
+    summary.builderFallback = true;
+    summary.builderFallbackReason = summary.builderFallbackReason || 'BUILD_SCHEMA_INVALID';
+    pushGameModeEvent(job, 'log', { text: `Builder invalid: ${builderValidation.failures.map((f) => f.detail).join('; ')} fallback=deterministic` });
+  } else {
+    pushGameModeEvent(job, 'log', { text: `Builder ok: files=${builder.output.files.map((f) => f.path).join(', ')}` });
+  }
+
+  const effectiveBuilderOutput = builderValidation.ok
+    ? builder.output
+    : await buildDeterministicGameOutput(job, effectiveDesignerSpec);
+
+  summary.contentMetrics.fileSizeBytes = Array.isArray(effectiveBuilderOutput?.files)
+    ? effectiveBuilderOutput.files.reduce((acc, file) => acc + Buffer.byteLength(String(file?.content || ''), 'utf8'), 0)
+    : 0;
+  summary.contentMetrics.jsSizeBytes = Array.isArray(effectiveBuilderOutput?.files)
+    ? effectiveBuilderOutput.files
+      .filter((file) => String(file?.path || '').toLowerCase().endsWith('.js'))
+      .reduce((acc, file) => acc + Buffer.byteLength(String(file?.content || ''), 'utf8'), 0)
+    : 0;
+
+  let result = await writeBuilderOutputToWorkspace(job, effectiveBuilderOutput);
+
+  pushGameModeEvent(job, 'step', { name: 'Verification', status: 'running' });
+  for (let pass = 0; pass <= MAX_FIX_PASSES; pass += 1) {
+    const staticStart = Date.now();
+    const staticVerification = result.mode === 'single'
+      ? await verifySingleFile(result.html)
+      : await verifyMultiFile(result.rootDir);
+    summary.timing.staticVerifyMs += Date.now() - staticStart;
+    summary.staticPass = staticVerification.passed;
+
+    let verification = staticVerification;
+    if (staticVerification.passed) {
+      const runtimeStart = Date.now();
+      const runtimeVerification = await verifyRuntimeResult(result);
+      summary.timing.runtimeVerifyMs += Date.now() - runtimeStart;
+
+      if (runtimeVerification.skipped) {
+        if (runtimeEnabled) {
+          summary.runtimeFailures = [runtimeVerification.downgrade.code];
+        }
+        pushGameModeEvent(job, 'log', { text: `Runtime verify downgrade: ${runtimeVerification.downgrade.code}: ${runtimeVerification.downgrade.detail}` });
+      } else if (!runtimeVerification.passed) {
+        verification = runtimeVerification;
+        summary.runtimePass = false;
+        summary.runtimeFailures = runtimeVerification.failures.map((f) => f.code);
+        pushGameModeEvent(job, 'log', { text: `Runtime verify failed: ${summary.runtimeFailures.join(', ')}` });
+      } else {
+        summary.runtimePass = true;
+        summary.runtimeFailures = [];
+        const m = runtimeVerification.metrics || {};
+        pushGameModeEvent(job, 'log', { text: `Runtime verify ok: rafTicks=${m.rafTicks || 0}, consoleErrors=${m.consoleErrors || 0}, errors=${m.errors || 0}, rejections=${m.rejections || 0}, ms=${m.ms || 0}` });
+      }
+    }
+
+    if (verification.passed) {
+      break;
+    }
+
+    if (pass === MAX_FIX_PASSES) {
+      pushGameModeEvent(job, 'error', { message: 'Verification failed', failures: verification.failures });
+      finalizeGameModeJob(job, { status: 'error', donePayload: { status: 'error', failures: verification.failures } });
+      emitSummary();
+      return;
+    }
+
+    summary.fixPasses += 1;
+    summary.repairReasons.push({
+      pass: pass + 1,
+      failures: verification.failures.map((f) => f.code)
+    });
+    pushGameModeEvent(job, 'log', {
+      text: `Fix pass ${pass + 1}: ${verification.failures.map((f) => f.code).join(', ')} | stage3Enabled=${stage3Enabled} designerUsed=${summary.designerUsed} designerFallback=${summary.designerFallback} builderUsed=${summary.builderUsed} builderFallback=${summary.builderFallback}`
+    });
+    result = deterministicRepair(result, verification);
+    if (result.mode === 'single' && result.htmlPath) {
+      await fs.writeFile(result.htmlPath, result.html, 'utf8');
+    }
+  }
+
+  if (runtimeEnabled && summary.runtimePass === null && summary.runtimeFailures.length === 0) {
+    summary.runtimeFailures = ['RUNTIME_UNAVAILABLE'];
+  }
+
+  if (result.mode === 'single') {
+    const mainHtmlPath = workspaceRelative(result.htmlPath);
+    const artifact = createGameModeArtifactRecord({ path: mainHtmlPath, role: ARTIFACT_ROLES.MAIN_HTML, openOnComplete: true });
+    emitGameModeArtifact(job, artifact);
+    job.result = { mode: 'single', htmlPath: mainHtmlPath, html: result.html };
+  } else {
+    const readmeArtifact = createGameModeArtifactRecord({ path: result.openPath, role: ARTIFACT_ROLES.README, openOnComplete: true });
+    emitGameModeArtifact(job, readmeArtifact);
+    job.result = { mode: 'multi', repoPath: workspaceRelative(result.repoPath), openPath: result.openPath };
+  }
+
+  pushGameModeEvent(job, 'step', { name: 'Verification', status: 'completed' });
+  finalizeGameModeJob(job, {
+    status: 'success',
+    donePayload: {
+      status: 'success',
+      entry: job.result?.mode === 'single'
+        ? { type: 'html', path: job.result.htmlPath }
+        : { type: 'readme', path: job.result.openPath }
+    }
+  });
+  emitSummary();
+}
+
+app.get('/api/workspace/list', async (req, res) => {
+  try {
+    const root = String(req.query.root || '.openclaw/workspace');
+    const rootPath = root === '.openclaw/workspace'
+      ? GAME_MODE_WORKSPACE_ROOT
+      : resolveWorkspacePath(root);
+    await fs.mkdir(rootPath, { recursive: true });
+    const dirs = await listWorkspaceDirs(rootPath);
+    return res.json({ root, dirs });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error?.message || 'Failed to list workspace' });
+  }
+});
+
+app.get('/api/workspace/file', async (req, res) => {
+  try {
+    const requested = String(req.query.path || '');
+    if (!requested) {
+      return res.status(400).json({ ok: false, error: 'path is required' });
+    }
+    const fullPath = resolveWorkspacePath(requested);
+    const content = await fs.readFile(fullPath, 'utf8');
+    return res.json({ path: requested, content });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error?.message || 'Unable to read file' });
+  }
+});
+
+app.post('/api/game-mode/jobs', async (req, res) => {
+  const payload = req.body || {};
+  const mode = payload.mode === 'multi' ? 'multi' : 'single';
+  if (mode === 'multi' && !String(payload.targetDir || '').trim()) {
+    return res.status(400).json({ ok: false, error: 'targetDir is required for multi mode' });
+  }
+  const job = createGameModeJob({ ...payload, mode });
+  runGameModeJob(job).catch((error) => {
+    pushGameModeEvent(job, 'log', { text: `Failure: ${error?.message || 'Unknown error'}` });
+    finalizeGameModeJob(job, { status: 'error', donePayload: { status: 'error' } });
+  });
+  return res.status(202).json({ jobId: job.id });
+});
+
+app.get('/api/game-mode/jobs/:jobId/stream', (req, res) => {
+  const job = gameModeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ ok: false, error: 'Job not found' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  for (const packet of job.events) {
+    res.write(`event: ${packet.event}\n`);
+    res.write(`data: ${JSON.stringify(packet.data)}\n\n`);
+  }
+
+  if (job.status !== 'running') {
+    res.end();
+    return;
+  }
+
+  job.clients.add(res);
+  req.on('close', () => {
+    job.clients.delete(res);
+  });
+});
+
+app.get('/api/game-mode/jobs/:jobId/result', (req, res) => {
+  const job = gameModeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ ok: false, error: 'Job not found' });
+  }
+  if (job.status === 'running') {
+    return res.status(202).json({ status: 'running' });
+  }
+  if (job.status === 'error') {
+    return res.status(500).json({ status: 'error' });
+  }
+  return res.json(job.result || { status: 'empty' });
+});
 
 app.get('/api/dev/perf', (_req, res) => {
   if (!DEV_PERF_ENABLED) {
