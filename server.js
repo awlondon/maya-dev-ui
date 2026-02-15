@@ -3339,6 +3339,13 @@ app.post('/api/stripe/webhook', async (req, res) => {
 });
 
 
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    ok: false,
+    error: `API route not found: ${req.method} ${req.originalUrl}`
+  });
+});
+
 app.get('/ws', (req, res) => {
   res.set('Cache-Control', 'no-store');
   return res.status(426).json({ ok: false, error: 'Upgrade Required', hint: 'Use a WebSocket client for /ws' });
