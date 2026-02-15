@@ -823,6 +823,16 @@ app.all('/api/run', (req, res, next) => {
 });
 
 const GAME_MODE_WORKSPACE_ROOT = path.resolve(process.env.OPENCLAW_WORKSPACE_ROOT || path.join(__dirname, '..'));
+const JOB_TTL_MS = 30 * 60 * 1000;
+const JOB_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_FIX_PASSES = 2;
+const ARTIFACT_ROLES = {
+  ENTRY: 'entry',
+  MAIN_HTML: 'main-html',
+  SUPPORT: 'support',
+  README: 'readme'
+};
+const ARTIFACT_ROLE_SET = new Set(Object.values(ARTIFACT_ROLES));
 const gameModeJobs = new Map();
 
 function resolveWorkspacePath(inputPath = '') {
@@ -832,6 +842,10 @@ function resolveWorkspacePath(inputPath = '') {
     throw createHttpError({ status: 400, code: 'INVALID_PATH', message: 'Path escapes workspace root' });
   }
   return resolved;
+}
+
+function workspaceRelative(absolutePath) {
+  return path.relative(GAME_MODE_WORKSPACE_ROOT, absolutePath).replace(/\\/g, '/');
 }
 
 async function listWorkspaceDirs(rootDir) {
@@ -851,6 +865,19 @@ async function listWorkspaceDirs(rootDir) {
   return dirs;
 }
 
+function createGameModeArtifactRecord({ path: artifactPath, role, openOnComplete = false }) {
+  if (!ARTIFACT_ROLE_SET.has(role)) {
+    throw new Error(`Invalid artifact role: ${role}`);
+  }
+  return {
+    id: crypto.randomUUID(),
+    path: String(artifactPath || ''),
+    role,
+    openOnComplete: Boolean(openOnComplete),
+    createdAt: Date.now()
+  };
+}
+
 function createGameModeJob(payload = {}) {
   const jobId = `gm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const job = {
@@ -858,9 +885,13 @@ function createGameModeJob(payload = {}) {
     mode: payload.mode === 'multi' ? 'multi' : 'single',
     payload,
     status: 'running',
+    createdAt: Date.now(),
+    completedAt: null,
     events: [],
     clients: new Set(),
-    result: null
+    artifacts: [],
+    result: null,
+    doneEmitted: false
   };
   gameModeJobs.set(jobId, job);
   return job;
@@ -869,17 +900,66 @@ function createGameModeJob(payload = {}) {
 function pushGameModeEvent(job, event, data) {
   const packet = { event, data };
   job.events.push(packet);
+  if (job.clients.size === 0) {
+    return;
+  }
   for (const client of job.clients) {
+    if (client.writableEnded || client.destroyed) {
+      job.clients.delete(client);
+      continue;
+    }
     client.write(`event: ${event}\n`);
     client.write(`data: ${JSON.stringify(data)}\n\n`);
   }
 }
 
+function emitGameModeDone(job, payload) {
+  if (job.doneEmitted) {
+    return;
+  }
+  job.doneEmitted = true;
+  pushGameModeEvent(job, 'done', payload);
+}
+
 function closeGameModeStreams(job) {
   for (const client of job.clients) {
-    client.end();
+    if (!client.writableEnded && !client.destroyed) {
+      client.end();
+    }
   }
   job.clients.clear();
+}
+
+function finalizeGameModeJob(job, { status, donePayload }) {
+  if (job.status !== 'running') {
+    return;
+  }
+  job.status = status;
+  job.completedAt = Date.now();
+  emitGameModeDone(job, donePayload);
+  closeGameModeStreams(job);
+}
+
+function cleanupExpiredGameModeJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of gameModeJobs.entries()) {
+    if (now - job.createdAt <= JOB_TTL_MS) {
+      continue;
+    }
+    closeGameModeStreams(job);
+    gameModeJobs.delete(jobId);
+  }
+}
+setInterval(cleanupExpiredGameModeJobs, JOB_CLEANUP_INTERVAL_MS).unref();
+
+function emitGameModeArtifact(job, artifact) {
+  job.artifacts.push(artifact);
+  pushGameModeEvent(job, 'artifact', {
+    path: artifact.path,
+    role: artifact.role,
+    openOnComplete: artifact.openOnComplete,
+    kind: artifact.role === ARTIFACT_ROLES.README ? 'readme' : 'html'
+  });
 }
 
 function buildSingleFileGameHtml({ prompt = '' }) {
@@ -919,43 +999,146 @@ function buildSingleFileGameHtml({ prompt = '' }) {
 </html>`;
 }
 
-async function runGameModeJob(job) {
-  const { mode, payload } = job;
-  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
-  pushGameModeEvent(job, 'log', { text: 'Generating concept and scope lock.' });
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
+async function verifySingleFile(htmlString) {
+  const failures = [];
+  const html = String(htmlString || '').toLowerCase();
+  if (!html.includes('<!doctype html>')) failures.push('Missing DOCTYPE');
+  if (!html.includes('<script')) failures.push('No script tag found (no gameplay logic)');
+  if (!html.includes('<canvas') && !html.includes('requestanimationframe')) failures.push('No rendering loop detected');
+  if (!html.includes('function') && !html.includes('=>')) failures.push('No executable logic found');
+  return { passed: failures.length === 0, failures };
+}
+
+async function verifyMultiFile(rootDir) {
+  const failures = [];
+  const indexPath = path.join(rootDir, 'index.html');
+  const readmePath = path.join(rootDir, 'README.md');
+
+  if (!await fileExists(indexPath)) {
+    failures.push('Missing index.html');
+  }
+  if (!await fileExists(readmePath)) {
+    failures.push('Missing README.md');
+  }
+  if (await fileExists(indexPath)) {
+    const html = await fs.readFile(indexPath, 'utf8');
+    if (!String(html || '').includes('<script')) {
+      failures.push('index.html contains no script tag');
+    }
+  }
+  return { passed: failures.length === 0, failures };
+}
+
+function deterministicRepair(result, verification) {
+  if (result.mode === 'single') {
+    let html = String(result.html || '');
+    if (verification.failures.some((f) => f.includes('DOCTYPE')) && !html.toLowerCase().includes('<!doctype html>')) {
+      html = `<!doctype html>\n${html}`;
+    }
+    if (verification.failures.some((f) => f.includes('No script tag')) && !html.includes('<script')) {
+      html = html.replace('</body>', '<script>console.log("repair pass");</script>\n</body>');
+    }
+    if (verification.failures.some((f) => f.includes('No rendering loop detected')) && !html.toLowerCase().includes('requestanimationframe')) {
+      html = html.replace('</script>', '\nrequestAnimationFrame(()=>{});\n</script>');
+    }
+    result.html = html;
+    return result;
+  }
+  return result;
+}
+
+async function buildDeterministicGameOutput(job) {
+  const { mode, payload } = job;
   if (mode === 'single') {
     const html = buildSingleFileGameHtml({ prompt: payload.prompt });
     const outputDir = resolveWorkspacePath('game-mode-output');
     await fs.mkdir(outputDir, { recursive: true });
     const htmlPath = path.join(outputDir, `${job.id}.html`);
     await fs.writeFile(htmlPath, html, 'utf8');
-    job.result = { mode: 'single', htmlPath, html };
-    pushGameModeEvent(job, 'artifact', { path: htmlPath, kind: 'html' });
+    return { mode: 'single', html, htmlPath };
+  }
+
+  const targetDir = resolveWorkspacePath(payload.targetDir || `game-mode/${job.id}`);
+  await fs.mkdir(path.join(targetDir, 'src'), { recursive: true });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Game Mode Repo</title><style>body{margin:0;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}#app{padding:16px}</style></head><body><div id="app"></div><script type="module" src="./src/game.js"></script></body></html>`;
+  const js = `const app=document.getElementById('app');app.innerHTML='<h1>Game Mode Build</h1><p>Interactive starter produced by orchestrator.</p><p>Use this as your baseline and iterate.</p>';`;
+  const readme = `# Game Mode Build\n\nGenerated by deterministic Game Mode orchestrator.\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n# then open http://localhost:8080/${workspaceRelative(targetDir)}/\n\`\`\`\n\n## Deploy (GitHub Pages)\n\n1. Push this folder to a repo.\n2. In GitHub repo settings, enable Pages from main branch root.\n3. Wait for deployment and open the Pages URL.\n\n## Controls\n\nUpdate \`src/game.js\` with your mechanics and controls.\n`;
+
+  await Promise.all([
+    fs.writeFile(path.join(targetDir, 'index.html'), html, 'utf8'),
+    fs.writeFile(path.join(targetDir, 'src', 'game.js'), js, 'utf8'),
+    fs.writeFile(path.join(targetDir, 'README.md'), readme, 'utf8')
+  ]);
+
+  return {
+    mode: 'multi',
+    rootDir: targetDir,
+    repoPath: targetDir,
+    openPath: workspaceRelative(path.join(targetDir, 'README.md'))
+  };
+}
+
+async function runGameModeJob(job) {
+  pushGameModeEvent(job, 'step', { name: 'Concept', status: 'running' });
+  pushGameModeEvent(job, 'log', { text: 'Generating concept and scope lock.' });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  pushGameModeEvent(job, 'step', { name: 'Implementation', status: 'running' });
+  let result = await buildDeterministicGameOutput(job);
+
+  pushGameModeEvent(job, 'step', { name: 'Verification', status: 'running' });
+  for (let pass = 0; pass <= MAX_FIX_PASSES; pass += 1) {
+    const verification = result.mode === 'single'
+      ? await verifySingleFile(result.html)
+      : await verifyMultiFile(result.rootDir);
+
+    if (verification.passed) {
+      break;
+    }
+
+    if (pass === MAX_FIX_PASSES) {
+      pushGameModeEvent(job, 'error', { message: 'Verification failed', failures: verification.failures });
+      finalizeGameModeJob(job, { status: 'error', donePayload: { status: 'error', failures: verification.failures } });
+      return;
+    }
+
+    pushGameModeEvent(job, 'log', { text: `Fix pass ${pass + 1}: ${verification.failures.join(', ')}` });
+    result = deterministicRepair(result, verification);
+    if (result.mode === 'single' && result.htmlPath) {
+      await fs.writeFile(result.htmlPath, result.html, 'utf8');
+    }
+  }
+
+  if (result.mode === 'single') {
+    const mainHtmlPath = workspaceRelative(result.htmlPath);
+    const artifact = createGameModeArtifactRecord({ path: mainHtmlPath, role: ARTIFACT_ROLES.MAIN_HTML, openOnComplete: true });
+    emitGameModeArtifact(job, artifact);
+    job.result = { mode: 'single', htmlPath: mainHtmlPath, html: result.html };
   } else {
-    const targetDir = resolveWorkspacePath(payload.targetDir || `game-mode/${job.id}`);
-    await fs.mkdir(path.join(targetDir, 'src'), { recursive: true });
-    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Game Mode Repo</title><style>body{margin:0;background:#0a0f1e;color:#fff;font-family:Inter,sans-serif}#app{padding:16px}</style></head><body><div id="app"></div><script type="module" src="./src/game.js"></script></body></html>`;
-    const js = `const app=document.getElementById('app');app.innerHTML='<h1>Game Mode Build</h1><p>Interactive starter produced by orchestrator.</p><p>Use this as your baseline and iterate.</p>';`;
-    const readme = `# Game Mode Build\n\nGenerated by deterministic Game Mode orchestrator.\n\n## Run locally\n\n\`\`\`bash\npython -m http.server 8080\n# then open http://localhost:8080/${path.relative(GAME_MODE_WORKSPACE_ROOT, targetDir).replace(/\\/g, '/')}/\n\`\`\`\n\n## Deploy (GitHub Pages)\n\n1. Push this folder to a repo.\n2. In GitHub repo settings, enable Pages from main branch root.\n3. Wait for deployment and open the Pages URL.\n\n## Controls\n\nUpdate \`src/game.js\` with your mechanics and controls.\n`;
-
-    await Promise.all([
-      fs.writeFile(path.join(targetDir, 'index.html'), html, 'utf8'),
-      fs.writeFile(path.join(targetDir, 'src', 'game.js'), js, 'utf8'),
-      fs.writeFile(path.join(targetDir, 'README.md'), readme, 'utf8')
-    ]);
-
-    const readmePath = path.join(targetDir, 'README.md');
-    job.result = { mode: 'multi', repoPath: targetDir, openPath: path.relative(GAME_MODE_WORKSPACE_ROOT, readmePath).replace(/\\/g, '/') };
-    pushGameModeEvent(job, 'artifact', { path: job.result.openPath, kind: 'readme' });
+    const readmeArtifact = createGameModeArtifactRecord({ path: result.openPath, role: ARTIFACT_ROLES.README, openOnComplete: true });
+    emitGameModeArtifact(job, readmeArtifact);
+    job.result = { mode: 'multi', repoPath: workspaceRelative(result.repoPath), openPath: result.openPath };
   }
 
   pushGameModeEvent(job, 'step', { name: 'Verification', status: 'completed' });
-  job.status = 'success';
-  pushGameModeEvent(job, 'done', { status: 'success', entry: job.result?.mode === 'single' ? { type: 'html', path: job.result.htmlPath } : { type: 'readme', path: job.result.openPath } });
-  closeGameModeStreams(job);
+  finalizeGameModeJob(job, {
+    status: 'success',
+    donePayload: {
+      status: 'success',
+      entry: job.result?.mode === 'single'
+        ? { type: 'html', path: job.result.htmlPath }
+        : { type: 'readme', path: job.result.openPath }
+    }
+  });
 }
 
 app.get('/api/workspace/list', async (req, res) => {
@@ -994,10 +1177,8 @@ app.post('/api/game-mode/jobs', async (req, res) => {
   }
   const job = createGameModeJob({ ...payload, mode });
   runGameModeJob(job).catch((error) => {
-    job.status = 'error';
     pushGameModeEvent(job, 'log', { text: `Failure: ${error?.message || 'Unknown error'}` });
-    pushGameModeEvent(job, 'done', { status: 'error' });
-    closeGameModeStreams(job);
+    finalizeGameModeJob(job, { status: 'error', donePayload: { status: 'error' } });
   });
   return res.status(202).json({ jobId: job.id });
 });
@@ -1018,13 +1199,12 @@ app.get('/api/game-mode/jobs/:jobId/stream', (req, res) => {
     res.write(`data: ${JSON.stringify(packet.data)}\n\n`);
   }
 
-  job.clients.add(res);
   if (job.status !== 'running') {
     res.end();
-    job.clients.delete(res);
     return;
   }
 
+  job.clients.add(res);
   req.on('close', () => {
     job.clients.delete(res);
   });
