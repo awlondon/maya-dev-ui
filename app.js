@@ -1961,6 +1961,25 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
   syncSessionToSandbox();
 }
 
+function getGoogleAuthFailureMessage({ status, reason, hint }) {
+  if (reason === 'CLIENT_ID_MISMATCH') {
+    return `Google sign-in failed: ${hint || 'Client ID mismatch. Check GOOGLE_CLIENT_ID settings.'}`;
+  }
+  if (status === 401) {
+    return `Google sign-in failed: ${hint || 'Authentication could not be verified.'}`;
+  }
+  if (status >= 500 || reason === 'Google auth failed') {
+    return 'Google sign-in failed: Authentication service is temporarily unavailable. Please try again.';
+  }
+  if (typeof reason === 'string' && reason.trim()) {
+    return `Google sign-in failed: ${reason}`;
+  }
+  if (status) {
+    return `Google sign-in failed: HTTP ${status}`;
+  }
+  return 'Google sign-in failed. Please try again.';
+}
+
 async function handleGoogleCredential(response) {
   if (!response?.credential) {
     console.warn('Google auth failed.', { reason: 'Missing Google credential payload' });
@@ -1972,7 +1991,7 @@ async function handleGoogleCredential(response) {
   if (tokenAud && window.GOOGLE_CLIENT_ID && tokenAud !== window.GOOGLE_CLIENT_ID) {
     const hint = `Google client mismatch (token aud=${tokenAud}, frontend=${window.GOOGLE_CLIENT_ID}).`;
     console.warn('Google auth failed.', { reason: 'CLIENT_ID_MISMATCH', hint });
-    showToast(`Google sign-in failed: ${hint}`, { variant: 'error', duration: 7000 });
+    showToast(getGoogleAuthFailureMessage({ reason: 'CLIENT_ID_MISMATCH', hint }), { variant: 'error', duration: 7000 });
     return;
   }
 
@@ -1992,7 +2011,7 @@ async function handleGoogleCredential(response) {
       ? 'Check that frontend and backend GOOGLE_CLIENT_ID are identical.'
       : null;
     console.warn('Google auth failed.', { status: res.status, reason, hint });
-    showToast(`Google sign-in failed: ${reason}${hint ? ` — ${hint}` : ''}`, { variant: 'error', duration: 6000 });
+    showToast(getGoogleAuthFailureMessage({ status: res.status, reason, hint }), { variant: 'error', duration: 6000 });
     return;
   }
 
@@ -9211,6 +9230,7 @@ const preview = {
   handshakeTimer: null,
   handshakeRetryTimer: null,
   pingTimer: null,
+  handshakeStartedAt: 0,
   shouldBypassHandshake(frame = this.activeFrame) {
     return typeof frame?.srcdoc === 'string' && frame.srcdoc.includes(SESSION_BRIDGE_MARKER);
   },
@@ -9220,6 +9240,7 @@ const preview = {
     this.listeners.clear();
     this.activeFrame = frame;
     this.loadEventSeen = false;
+    this.handshakeStartedAt = 0;
     this.clearHandshakeTimers();
     setPreviewErrorBanner('');
     previewHandshakeAttempt = 0;
@@ -9258,6 +9279,9 @@ const preview = {
     this.ready = false;
     this.readyMeta = null;
     this.clearHandshakeTimers();
+    if (!this.handshakeStartedAt) {
+      this.handshakeStartedAt = Date.now();
+    }
     const frame = this.activeFrame;
 
     const sendPing = () => {
@@ -9282,6 +9306,11 @@ const preview = {
     this.handshakeTimer = window.setTimeout(() => {
       this.clearHandshakeTimers();
       if (this.ready) {
+        return;
+      }
+      const handshakeElapsedMs = Date.now() - this.handshakeStartedAt;
+      if (!this.loadEventSeen && handshakeElapsedMs < PREVIEW_HANDSHAKE_TIMEOUT_MS * 2) {
+        this.handshakeRetryTimer = window.setTimeout(() => this.startHandshake('await-load'), 180);
         return;
       }
       if (previewHandshakeAttempt < PREVIEW_HANDSHAKE_MAX_RETRIES) {
@@ -9317,6 +9346,7 @@ const preview = {
     this.ready = true;
     this.readyMeta = meta;
     this.clearHandshakeTimers();
+    this.handshakeStartedAt = 0;
     setPreviewErrorBanner('');
     if (pendingPreviewPerf) {
       const duration = pendingPreviewPerf.end({ ready: true, ...meta });
