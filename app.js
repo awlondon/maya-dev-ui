@@ -30,6 +30,7 @@ if (!window.GOOGLE_CLIENT_ID) {
 
 function resolveApiBase() {
   const rawApiBase =
+    window.__MAYA_API_BASE ||
     window.API_BASE ||
     (window.location.hostname === "localhost"
       ? "http://localhost:8080"
@@ -54,6 +55,22 @@ function resolveWebSocketBase() {
 const API_BASE = resolveApiBase();
 const WS_BASE = resolveWebSocketBase();
 const AGENT_STATUS_WS_ENABLED = window.ENABLE_AGENT_STATUS_WS === true;
+
+async function apiFetch(url, options = {}) {
+  const fetchOptions = options || {};
+  const body = fetchOptions.body;
+  const isFormDataBody = typeof FormData !== 'undefined' && body instanceof FormData;
+  const mergedHeaders = {
+    ...(isFormDataBody ? {} : { 'Content-Type': 'application/json' }),
+    ...(fetchOptions.headers || {})
+  };
+
+  return fetch(url, {
+    credentials: 'include',
+    ...fetchOptions,
+    headers: mergedHeaders
+  });
+}
 const appMachine = new AppStateMachine();
 
 function hasAuthHints() {
@@ -86,6 +103,13 @@ async function safeFetchJSON(url, options = {}, fallback = null) {
     console.warn(`Network error for ${url}`, err);
     return fallback;
   }
+}
+
+function hasPersistedSessionHint() {
+  return Boolean(
+    safeStorageGet('maya_token')
+    || safeStorageGet('maya_user')
+  );
 }
 
 function safeStorageGet(key) {
@@ -156,7 +180,11 @@ async function fetchOptionalApi(path, options = {}) {
 
   const requestPromise = (async () => {
     try {
-      const response = await fetch(`${API_BASE}${path}`, { mode: 'cors', ...fetchOptions });
+      const response = await fetch(`${API_BASE}${path}`, {
+        mode: 'cors',
+        ...fetchOptions,
+        credentials: 'include'
+      });
       if (response.status === 404 || response.status === 405 || response.status === 501) {
         unsupportedApiEndpoints.add(endpointKey);
         if (window.location.hostname === 'localhost') {
@@ -332,7 +360,7 @@ const EmailAuthSlot = (() => {
       render();
 
       try {
-        const res = await fetch(`${API_BASE}/api/auth/email/request`, {
+        const res = await apiFetch(`${API_BASE}/api/auth/email/request`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -1113,7 +1141,7 @@ async function* streamTextChunks(response) {
 }
 
 async function resumeAgentStream(resumeToken, signal) {
-  const response = await fetch(`${API_BASE}/api/agent/resume`, {
+  const response = await apiFetch(`${API_BASE}/api/agent/resume`, {
     method: 'POST',
     signal,
     credentials: 'include',
@@ -1506,6 +1534,7 @@ const SESSION_BRIDGE_SCRIPT = `${SESSION_BRIDGE_MARKER}
           timestamp: Date.now()
         }, '*');
         window.parent.postMessage({ type: 'sandbox-ready' }, '*');
+        window.parent.postMessage({ type: 'preview-ready' }, '*');
       } catch (err) {
         console.warn('postMessage blocked by COOP');
       }
@@ -1825,7 +1854,8 @@ function handleSandboxReadyMessage(event) {
   const messageType = event?.data?.type;
   const isLegacyReady = messageType === 'sandbox-ready';
   const isPreviewReady = messageType === 'READY' && event?.data?.channel === 'maya-preview';
-  if (!isLegacyReady && !isPreviewReady) {
+  const isSimplePreviewReady = messageType === 'preview-ready';
+  if (!isLegacyReady && !isPreviewReady && !isSimplePreviewReady) {
     return;
   }
   if (event.source !== sandboxFrame?.contentWindow) {
@@ -1920,7 +1950,12 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
 }
 
 async function handleGoogleCredential(response) {
-  const res = await fetch(`${API_BASE}/api/auth/google`, {
+  if (!response?.credential) {
+    console.warn('Google auth failed.', { reason: 'Missing Google credential payload' });
+    return;
+  }
+
+  const res = await apiFetch(`${API_BASE}/api/auth/google`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -1937,7 +1972,7 @@ async function handleGoogleCredential(response) {
     return;
   }
 
-  const meRes = await fetch(`${API_BASE}/api/me`, {
+  const meRes = await apiFetch(`${API_BASE}/api/me`, {
     method: 'GET',
     credentials: 'include'
   });
@@ -2064,7 +2099,7 @@ function initAppleAuth() {
     const res = await window.AppleID.auth.signIn();
     const auth = res.authorization;
 
-    const server = await fetch(`${API_BASE}/api/auth/apple`, {
+    const server = await apiFetch(`${API_BASE}/api/auth/apple`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -3331,7 +3366,7 @@ async function saveAccountPreferences({ newsletterOptIn, contextMode }) {
     return false;
   }
   try {
-    const response = await fetch(`${API_BASE}/api/account/preferences`, {
+    const response = await apiFetch(`${API_BASE}/api/account/preferences`, {
       method: 'PATCH',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -3458,7 +3493,7 @@ async function postSessionClose(summary) {
     return;
   }
   try {
-    await fetch(`${API_BASE}/api/session/close`, {
+    await apiFetch(`${API_BASE}/api/session/close`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -3577,7 +3612,7 @@ async function requestLogout() {
     return;
   }
   try {
-    await fetch(`${API_BASE}/api/auth/logout`, {
+    await apiFetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include'
     });
@@ -3625,7 +3660,7 @@ async function requestAccountDeletion() {
     return false;
   }
   try {
-    const response = await fetch(`${API_BASE}/api/account`, {
+    const response = await apiFetch(`${API_BASE}/api/account`, {
       method: 'DELETE',
       credentials: 'include'
     });
@@ -3780,7 +3815,7 @@ function setRoute(path) {
 
 async function hydrateSessionFromServer() {
   try {
-    const res = await fetch(`${API_BASE}/api/me`, { credentials: 'include' });
+    const res = await apiFetch(`${API_BASE}/api/me`, { credentials: 'include' });
     if (res?.ok) {
       return await res.json();
     }
@@ -3805,7 +3840,7 @@ async function checkEmailVerification() {
     return false;
   }
   try {
-    const res = await fetch(`${API_BASE}/api/auth/email/verify`, {
+    const res = await apiFetch(`${API_BASE}/api/auth/email/verify`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -4310,10 +4345,16 @@ async function bootApp() {
   updatePaywallPlanSelection(initialSelectedPlan);
   updatePaywallCtas(paywallModal?.dataset.mode || 'firm', initialSelectedPlan);
 
+<<<<<<< HEAD
   let session = null;
   if (hasAuthHints()) {
     session = await safeFetchJSON('/api/session/state', { credentials: 'include' }, null);
   }
+=======
+  const session = hasPersistedSessionHint()
+    ? await safeFetchJSON('/api/session/state', { credentials: 'include' }, null)
+    : null;
+>>>>>>> 410ccedd14de6ef9d0c0c7d64e9781e474f9de9a
   appMachine.dispatch(EVENTS.SESSION_OK);
   if (session) {
     featureState.authenticated = !!session.authenticated;
@@ -4345,6 +4386,7 @@ async function bootApp() {
 async function bootstrapApp() {
   await checkEmailVerification();
   hydrateCreditState();
+<<<<<<< HEAD
   if (hasAuthHints()) {
     fetchOptionalApi('/api/session/state', { cacheTtlMs: 0 }).then((response) => {
       backendHealthy = Boolean(response?.ok);
@@ -4355,6 +4397,9 @@ async function bootstrapApp() {
   } else {
     backendHealthy = true;
   }
+=======
+  backendHealthy = true;
+>>>>>>> 410ccedd14de6ef9d0c0c7d64e9781e474f9de9a
   await bootApp();
   applyAuthToRoot();
   const user = getAuthenticatedUser();
@@ -4622,7 +4667,7 @@ async function refreshBackendPerfMetrics() {
     return;
   }
   try {
-    const response = await fetch(`${API_BASE}/api/dev/perf`, { credentials: 'include' });
+    const response = await apiFetch(`${API_BASE}/api/dev/perf`, { credentials: 'include' });
     if (!response.ok) {
       throw new Error(`Perf endpoint status ${response.status}`);
     }
@@ -5588,7 +5633,7 @@ async function openOwnProfile() {
 
 async function inferArtifactMetadata({ messages, code }) {
   try {
-    const res = await fetch(`${API_BASE}/api/artifacts/metadata`, {
+    const res = await apiFetch(`${API_BASE}/api/artifacts/metadata`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -5684,7 +5729,7 @@ async function loadArtifactCodeVersions() {
 }
 
 async function createArtifact(payload) {
-  const res = await fetch(`${API_BASE}/api/artifacts`, {
+  const res = await apiFetch(`${API_BASE}/api/artifacts`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -5703,7 +5748,7 @@ async function createArtifact(payload) {
 }
 
 async function createArtifactVersion(artifactId, payload) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/version`, {
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/version`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -5718,7 +5763,7 @@ async function createArtifactVersion(artifactId, payload) {
 }
 
 async function fetchArtifactVersions(artifactId) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/versions`, { credentials: 'include' });
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/versions`, { credentials: 'include' });
   if (!res.ok) {
     throw new Error('Failed to load versions');
   }
@@ -5727,7 +5772,7 @@ async function fetchArtifactVersions(artifactId) {
 }
 
 async function fetchArtifactVersion(artifactId, versionId) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/versions/${versionId}`, { credentials: 'include' });
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/versions/${versionId}`, { credentials: 'include' });
   if (!res.ok) {
     throw new Error('Failed to load version');
   }
@@ -6288,7 +6333,7 @@ async function handleArtifactEdit(artifactId) {
     renderArtifactCollections();
     ModalManager.close();
     try {
-      const response = await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+      const response = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -6324,7 +6369,7 @@ async function handleArtifactDelete(artifactId) {
   ModalManager.open(html, { dismissible: true, onClose: () => {} });
   document.getElementById('artifactDeleteConfirm')?.addEventListener('click', async () => {
     try {
-      await fetch(`${API_BASE}/api/artifacts/${artifactId}`, {
+      await apiFetch(`${API_BASE}/api/artifacts/${artifactId}`, {
         method: 'DELETE',
         credentials: 'include'
       });
@@ -6384,7 +6429,7 @@ async function handleArtifactVisibilityToggle(artifactId) {
   document.getElementById('artifactVisibilityConfirm')?.addEventListener('click', async () => {
     try {
       if (makePublic) {
-        await fetch(`${API_BASE}/api/artifacts/${artifactId}/publish_settings`, {
+        await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/publish_settings`, {
           method: 'PATCH',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -6394,7 +6439,7 @@ async function handleArtifactVisibilityToggle(artifactId) {
           })
         });
       }
-      await fetch(`${API_BASE}/api/artifacts/${artifactId}/visibility`, {
+      await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/visibility`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -6423,7 +6468,7 @@ async function handleArtifactVisibilityToggle(artifactId) {
 async function handleArtifactDuplicate(artifactId) {
   try {
     const currentArtifact = findArtifactInState(artifactId);
-    const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
+    const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -6448,7 +6493,7 @@ async function handleArtifactDuplicate(artifactId) {
 async function handleArtifactImport(artifactId) {
   try {
     const sourceArtifact = findArtifactInState(artifactId);
-    const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
+    const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/fork`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -6516,7 +6561,7 @@ async function handleArtifactLikeToggle(artifactId) {
   });
   refreshArtifactViews();
   try {
-    const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/like`, {
+    const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/like`, {
       method: isLiked ? 'DELETE' : 'POST',
       credentials: 'include'
     });
@@ -6595,7 +6640,7 @@ function renderCommentsThread(comments) {
 }
 
 async function loadArtifactComments(artifactId) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/comments`, {
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/comments`, {
     credentials: 'include'
   });
   if (!res.ok) {
@@ -6606,7 +6651,7 @@ async function loadArtifactComments(artifactId) {
 }
 
 async function postArtifactComment({ artifactId, content, parentCommentId }) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/comments`, {
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/comments`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -6623,7 +6668,7 @@ async function postArtifactComment({ artifactId, content, parentCommentId }) {
 }
 
 async function deleteArtifactComment(commentId) {
-  const res = await fetch(`${API_BASE}/api/comments/${commentId}`, {
+  const res = await apiFetch(`${API_BASE}/api/comments/${commentId}`, {
     method: 'DELETE',
     credentials: 'include'
   });
@@ -6633,7 +6678,7 @@ async function deleteArtifactComment(commentId) {
 }
 
 async function postArtifactReport(artifactId, reason) {
-  const res = await fetch(`${API_BASE}/api/artifacts/${artifactId}/report`, {
+  const res = await apiFetch(`${API_BASE}/api/artifacts/${artifactId}/report`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -7180,7 +7225,7 @@ function hidePaywall() {
 async function openStripeCheckout(mode, planTier) {
   if (mode === 'subscription') {
     try {
-      const res = await fetch(`${API_BASE}/api/billing/subscriptions`, {
+      const res = await apiFetch(`${API_BASE}/api/billing/subscriptions`, {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -7207,7 +7252,7 @@ async function openStripeCheckout(mode, planTier) {
 
 async function openBillingPortal() {
   try {
-    const response = await fetch(`${API_BASE}/api/billing/portal-session`, {
+    const response = await apiFetch(`${API_BASE}/api/billing/portal-session`, {
       method: 'POST',
       credentials: 'include'
     });
@@ -7731,7 +7776,7 @@ async function fetchUsageOverview({ force = false } = {}) {
   }
   try {
     const res = await withTimeout(
-      fetch(`${API_BASE}/admin/usage/summary?days=30`, {
+      apiFetch(`${API_BASE}/admin/usage/summary?days=30`, {
         cache: force ? 'no-store' : 'default',
         credentials: 'include'
       }),
@@ -7765,7 +7810,7 @@ async function fetchUsageDaily({ days = 14, force = false } = {}) {
   }
   try {
     const res = await withTimeout(
-      fetch(`${API_BASE}/api/usage/daily?${params.toString()}`, {
+      apiFetch(`${API_BASE}/api/usage/daily?${params.toString()}`, {
         cache: force ? 'no-store' : 'default',
         credentials: 'include'
       }),
@@ -7789,7 +7834,7 @@ async function fetchUsageHistory({ days = 14, force = false } = {}) {
   }
   try {
     const res = await withTimeout(
-      fetch(`${API_BASE}/user/usage/history?${params.toString()}`, {
+      apiFetch(`${API_BASE}/user/usage/history?${params.toString()}`, {
         cache: force ? 'no-store' : 'default',
         credentials: 'include'
       }),
@@ -8558,7 +8603,7 @@ async function downloadSessionExport(summary, format) {
   }
   let payload = null;
   try {
-    const res = await fetch(`${API_BASE}/api/session/export/${encodeURIComponent(summary.session_id)}`, {
+    const res = await apiFetch(`${API_BASE}/api/session/export/${encodeURIComponent(summary.session_id)}`, {
       credentials: 'include'
     });
     if (res?.ok) {
@@ -9154,6 +9199,7 @@ const preview = {
   listeners: new Set(),
   readyMeta: null,
   activeFrame: null,
+  loadEventSeen: false,
   handshakeTimer: null,
   handshakeRetryTimer: null,
   pingTimer: null,
@@ -9165,11 +9211,13 @@ const preview = {
     this.readyMeta = null;
     this.listeners.clear();
     this.activeFrame = frame;
+    this.loadEventSeen = false;
     this.clearHandshakeTimers();
     setPreviewErrorBanner('');
     previewHandshakeAttempt = 0;
 
     frame.addEventListener('load', () => {
+      this.loadEventSeen = true;
       this.ready = false;
       this.readyMeta = null;
       if (this.shouldBypassHandshake(frame)) {
@@ -9189,6 +9237,11 @@ const preview = {
       return;
     }
     this.startHandshake('attach');
+    window.setTimeout(() => {
+      if (!this.ready && this.activeFrame === frame) {
+        console.warn('Preview fallback trigger');
+      }
+    }, 3000);
   },
   startHandshake(reason = 'attach') {
     if (!this.activeFrame || sandboxFrame !== this.activeFrame) {
@@ -9227,6 +9280,11 @@ const preview = {
         previewHandshakeAttempt += 1;
         console.info(`Preview handshake timeout, retry ${previewHandshakeAttempt}/${PREVIEW_HANDSHAKE_MAX_RETRIES}`);
         this.handshakeRetryTimer = window.setTimeout(() => this.startHandshake('retry'), 80);
+        return;
+      }
+      if (this.loadEventSeen) {
+        console.warn('Preview handshake unavailable; continuing with load-event fallback.');
+        this.acknowledgeReady({ reason: 'load-fallback', degradedHandshake: true });
         return;
       }
       setPreviewErrorBanner('Preview is unresponsive. Try Soft Reload or Hard Reload.');
@@ -11139,7 +11197,7 @@ async function sendChat({ playableMode = false, retryMode = false, userPrompt = 
     };
 
     const endpoint = playableMode ? `${API_BASE}/api/run` : `${API_BASE}/api/chat`;
-    const res = await fetch(endpoint, {
+    const res = await apiFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: chatAbortController.signal,
@@ -11685,7 +11743,7 @@ if (profileEditForm) {
       formData.append('gender', profileGenderInput?.value.trim() || '');
       formData.append('city', profileCityInput?.value.trim() || '');
       formData.append('country', profileCountryInput?.value.trim() || '');
-      const res = await fetch(`${API_BASE}/api/profile`, {
+      const res = await apiFetch(`${API_BASE}/api/profile`, {
         method: 'PATCH',
         credentials: 'include',
         body: formData
@@ -13038,7 +13096,7 @@ function wireAgentPanelEvents() {
       appendAgentLog('Initializing execution...');
 
       try {
-        const res = await fetch(`${API_BASE}/api/agent/runs`, {
+        const res = await apiFetch(`${API_BASE}/api/agent/runs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ objective: getCurrentPrompt() })
@@ -13358,7 +13416,7 @@ async function runMultiAgent() {
   clearAgentTaskLogs();
 
   try {
-    const response = await fetch(`${API_BASE}/api/agent/runs`, {
+    const response = await apiFetch(`${API_BASE}/api/agent/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
