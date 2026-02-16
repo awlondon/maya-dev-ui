@@ -1961,6 +1961,25 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
   syncSessionToSandbox();
 }
 
+function getGoogleAuthFailureMessage({ status, reason, hint }) {
+  if (reason === 'CLIENT_ID_MISMATCH') {
+    return `Google sign-in failed: ${hint || 'Client ID mismatch. Check GOOGLE_CLIENT_ID settings.'}`;
+  }
+  if (status === 401) {
+    return `Google sign-in failed: ${hint || 'Authentication could not be verified.'}`;
+  }
+  if (status >= 500 || reason === 'Google auth failed') {
+    return 'Google sign-in failed: Authentication service is temporarily unavailable. Please try again.';
+  }
+  if (typeof reason === 'string' && reason.trim()) {
+    return `Google sign-in failed: ${reason}`;
+  }
+  if (status) {
+    return `Google sign-in failed: HTTP ${status}`;
+  }
+  return 'Google sign-in failed. Please try again.';
+}
+
 async function handleGoogleCredential(response) {
   if (!response?.credential) {
     console.warn('Google auth failed.', { reason: 'Missing Google credential payload' });
@@ -1972,7 +1991,7 @@ async function handleGoogleCredential(response) {
   if (tokenAud && window.GOOGLE_CLIENT_ID && tokenAud !== window.GOOGLE_CLIENT_ID) {
     const hint = `Google client mismatch (token aud=${tokenAud}, frontend=${window.GOOGLE_CLIENT_ID}).`;
     console.warn('Google auth failed.', { reason: 'CLIENT_ID_MISMATCH', hint });
-    showToast(`Google sign-in failed: ${hint}`, { variant: 'error', duration: 7000 });
+    showToast(getGoogleAuthFailureMessage({ reason: 'CLIENT_ID_MISMATCH', hint }), { variant: 'error', duration: 7000 });
     return;
   }
 
@@ -1992,7 +2011,7 @@ async function handleGoogleCredential(response) {
       ? 'Check that frontend and backend GOOGLE_CLIENT_ID are identical.'
       : null;
     console.warn('Google auth failed.', { status: res.status, reason, hint });
-    showToast(`Google sign-in failed: ${reason}${hint ? ` — ${hint}` : ''}`, { variant: 'error', duration: 6000 });
+    showToast(getGoogleAuthFailureMessage({ status: res.status, reason, hint }), { variant: 'error', duration: 6000 });
     return;
   }
 
