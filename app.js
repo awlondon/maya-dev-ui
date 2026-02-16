@@ -80,6 +80,13 @@ async function safeFetchJSON(url, options = {}, fallback = null) {
   }
 }
 
+function hasPersistedSessionHint() {
+  return Boolean(
+    safeStorageGet('maya_token')
+    || safeStorageGet('maya_user')
+  );
+}
+
 function safeStorageGet(key) {
   try {
     return window.localStorage.getItem(key);
@@ -1912,6 +1919,11 @@ function onAuthSuccess({ user, token, provider, credits, deferRender = false }) 
 }
 
 async function handleGoogleCredential(response) {
+  if (!response?.credential) {
+    console.warn('Google auth failed.', { reason: 'Missing Google credential payload' });
+    return;
+  }
+
   const res = await fetch(`${API_BASE}/api/auth/google`, {
     method: 'POST',
     credentials: 'include',
@@ -4300,7 +4312,9 @@ async function bootApp() {
   updatePaywallPlanSelection(initialSelectedPlan);
   updatePaywallCtas(paywallModal?.dataset.mode || 'firm', initialSelectedPlan);
 
-  const session = await safeFetchJSON('/api/session/state', { credentials: 'include' }, null);
+  const session = hasPersistedSessionHint()
+    ? await safeFetchJSON('/api/session/state', { credentials: 'include' }, null)
+    : null;
   appMachine.dispatch(EVENTS.SESSION_OK);
   if (session) {
     featureState.authenticated = !!session.authenticated;
@@ -4332,12 +4346,7 @@ async function bootApp() {
 async function bootstrapApp() {
   await checkEmailVerification();
   hydrateCreditState();
-  fetchOptionalApi('/api/session/state', { cacheTtlMs: 0 }).then((response) => {
-    backendHealthy = Boolean(response?.ok);
-  }).catch(() => {
-    backendHealthy = false;
-    console.warn('Backend unreachable');
-  });
+  backendHealthy = true;
   await bootApp();
   applyAuthToRoot();
   const user = getAuthenticatedUser();
@@ -9137,6 +9146,7 @@ const preview = {
   listeners: new Set(),
   readyMeta: null,
   activeFrame: null,
+  loadEventSeen: false,
   handshakeTimer: null,
   handshakeRetryTimer: null,
   pingTimer: null,
@@ -9148,11 +9158,13 @@ const preview = {
     this.readyMeta = null;
     this.listeners.clear();
     this.activeFrame = frame;
+    this.loadEventSeen = false;
     this.clearHandshakeTimers();
     setPreviewErrorBanner('');
     previewHandshakeAttempt = 0;
 
     frame.addEventListener('load', () => {
+      this.loadEventSeen = true;
       this.ready = false;
       this.readyMeta = null;
       if (this.shouldBypassHandshake(frame)) {
@@ -9210,6 +9222,11 @@ const preview = {
         previewHandshakeAttempt += 1;
         console.warn(`Preview handshake timeout, retry ${previewHandshakeAttempt}/${PREVIEW_HANDSHAKE_MAX_RETRIES}`);
         this.handshakeRetryTimer = window.setTimeout(() => this.startHandshake('retry'), 80);
+        return;
+      }
+      if (this.loadEventSeen) {
+        console.warn('Preview handshake unavailable; continuing with load-event fallback.');
+        this.acknowledgeReady({ reason: 'load-fallback', degradedHandshake: true });
         return;
       }
       setPreviewErrorBanner('Preview is unresponsive. Try Soft Reload or Hard Reload.');
